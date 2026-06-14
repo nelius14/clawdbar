@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>io.clawdbar</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/REPLACE_USER/.clawdbar/.venv/bin/python3</string>
+        <string>/Users/REPLACE_USER/.clawdbar/daemon/daemon.py</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/REPLACE_USER/.clawdbar</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/REPLACE_USER/Library/Logs/clawdbar.out.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/REPLACE_USER/Library/Logs/clawdbar.err.log</string>
+
+    <key>ThrottleInterval</key>
+    <integer>10</integer>
+</dict>
+</plist>

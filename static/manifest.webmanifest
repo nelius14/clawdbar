@@ -1,0 +1,11 @@
+{
+  "name": "Clawdmeter",
+  "short_name": "Clawdmeter",
+  "description": "Claude Code usage monitor",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#0a0a0f",
+  "theme_color": "#0a0a0f",
+  "orientation": "portrait",
+  "icons": []
+}

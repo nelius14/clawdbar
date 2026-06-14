@@ -1,0 +1,27 @@
+Clawdbar — Licensing Notice
+===========================
+
+The source code in this repository (Python, shell scripts, HTML/JS/CSS logic)
+is original work and is provided freely for personal, non-commercial use.
+
+However, this repository includes assets that are NOT owned by the author and
+are used without explicit permission:
+
+  • The Clawd character and mascot are copyright Anthropic, PBC.
+  • The pixel-art Clawd sprites and animation data embedded in static/index.html
+    are sourced from claudepix (https://claudepix.vercel.app/) by @amaanbuilds.
+  • The Anthropic Sans and Anthropic Serif fonts, if present on your system,
+    are proprietary typefaces licensed to Anthropic. This software may load
+    them from ~/Library/Fonts/ but does not distribute them.
+
+Because this repository bundles copyrighted assets the author does not own,
+no open-source license is applied to the repository as a whole. You may read,
+fork, and adapt the code for personal use, but you should be aware that:
+
+  - The Clawd character and related visual assets remain Anthropic's property.
+  - The pixel-art sprites remain @amaanbuilds's work.
+  - Redistributing this project with those assets may infringe third-party
+    copyrights. Use your own judgement and obtain appropriate permissions
+    before any commercial or large-scale redistribution.
+
+You have been warned.

@@ -1,0 +1,26 @@
+# macOS
+.DS_Store
+**/.DS_Store
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Virtualenv (created by install.sh on the Air, never committed)
+venv/
+.venv/
+
+# Runtime logs
+*.log
+
+# pytest (cache artifacts; on the SMB mount these can't be rm'd in-session)
+.pytest_cache/
+pytest-cache-files-*/
+
+
+# SMB client delete-pending artifacts
+.smbdelete*
+**/.smbdelete*
+
+# archived artifacts
+assets/archive/
