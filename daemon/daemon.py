@@ -178,15 +178,18 @@ def try_refresh_oauth_token() -> str | None:
     On success, caches the token in memory and updates the credentials file.
     Returns the new access token, or None if refresh is not possible.
     """
+    refresh_tok = None
     try:
         raw = CREDENTIALS_PATH.read_text(encoding="utf-8")
-    except OSError as e:
-        log.debug("Cannot read credentials for refresh: %s", e)
-        return None
+        refresh_tok = _extract_refresh_token(raw)
+    except OSError:
+        pass  # No credentials file; fall through to Keychain
 
-    refresh_tok = _extract_refresh_token(raw)
+    if not refresh_tok and sys.platform == "darwin":
+        refresh_tok = read_refresh_token_keychain()
+
     if not refresh_tok:
-        log.warning("No refresh token in credentials — cannot auto-refresh")
+        log.warning("No refresh token available — cannot auto-refresh")
         return None
 
     body = urllib.parse.urlencode({
@@ -225,8 +228,8 @@ def try_refresh_oauth_token() -> str | None:
     return access_token
 
 
-def read_token_keychain() -> str | None:
-    """Read Claude OAuth token from macOS Keychain."""
+def _read_keychain_blob() -> str | None:
+    """Return the raw Keychain password string for KEYCHAIN_SERVICE, or None."""
     try:
         out = subprocess.run(
             [
@@ -240,13 +243,25 @@ def read_token_keychain() -> str | None:
             text=True,
             timeout=10,
         )
+        return out.stdout
     except subprocess.CalledProcessError as e:
         log.warning("Keychain read failed (rc=%s): %s", e.returncode, e.stderr.strip())
         return None
     except (FileNotFoundError, subprocess.TimeoutExpired) as e:
         log.warning("Keychain access error: %s", e)
         return None
-    return _extract_access_token(out.stdout)
+
+
+def read_token_keychain() -> str | None:
+    """Read Claude OAuth access token from macOS Keychain."""
+    blob = _read_keychain_blob()
+    return _extract_access_token(blob) if blob else None
+
+
+def read_refresh_token_keychain() -> str | None:
+    """Read Claude OAuth refresh token from macOS Keychain."""
+    blob = _read_keychain_blob()
+    return _extract_refresh_token(blob) if blob else None
 
 
 def read_token_file() -> str | None:
@@ -443,6 +458,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def poll_loop():
+    backoff = 5  # seconds; doubles on each failure up to POLL_INTERVAL
     while True:
         try:
             result = refresh_state()
@@ -458,15 +474,20 @@ def poll_loop():
                     result["session_pct"], result["status"], result["weekly_pct"],
                     result["session_reset_min"], result["weekly_reset_min"],
                 )
+                backoff = 5
+                time.sleep(POLL_INTERVAL)
             else:
                 log.error("Poll failed: %s", result["error"])
+                time.sleep(backoff)
+                backoff = min(backoff * 2, POLL_INTERVAL)
         except Exception as e:
             log.error("Poll failed: %s", e)
             with _state_lock:
                 _state["ok"] = False
                 _state["status"] = "error"
                 _state["error"] = str(e)
-        time.sleep(POLL_INTERVAL)
+            time.sleep(backoff)
+            backoff = min(backoff * 2, POLL_INTERVAL)
 
 
 if __name__ == "__main__":
