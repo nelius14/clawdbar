@@ -44,7 +44,7 @@ from Cocoa import (
     NSImage, NSMakeRect, NSMakeSize, NSPopover, NSPopoverBehaviorTransient,
     NSViewController, NSView, NSTimer, NSImageLeft,
     NSApplicationActivationPolicyAccessory, NSRunLoop, NSDefaultRunLoopMode,
-    NSMenu, NSMenuItem,
+    NSMenu, NSMenuItem, NSColor, NSAttributedString, NSForegroundColorAttributeName,
 )
 
 # NSEventMask constants (numeric to avoid PyObjC version issues)
@@ -58,6 +58,7 @@ DAEMON_HOST = "127.0.0.1"     # loopback IP (avoids ATS; localhost would need a 
 DAEMON_PORT = 7337
 DAEMON_BASE = f"http://{DAEMON_HOST}:{DAEMON_PORT}"
 USAGE_URL = f"{DAEMON_BASE}/usage"
+REFRESH_URL = f"{DAEMON_BASE}/refresh"  # forces the daemon to re-poll the API now
 POLL_SECONDS = 60.0
 POPOVER_W = 320
 POPOVER_H = 260  # tight-fit: header (40px) + 2 cards, no footer
@@ -207,8 +208,13 @@ class ClawdbarDelegate(NSObject):
         menu.setAutoenablesItems_(False)
 
         # Header: current usage (disabled label)
-        pct = self._poll_session_pct()
-        label = f"Session: {pct}% used" if pct is not None else "Session: -- (no data)"
+        pct, stale = self._poll_usage()
+        if pct is None:
+            label = "Session: -- (no data)"
+        elif stale:
+            label = f"Session: {pct}% used (stale — waiting for token refresh)"
+        else:
+            label = f"Session: {pct}% used"
         header = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(label, None, "")
         header.setEnabled_(False)
         menu.addItem_(header)
@@ -234,6 +240,14 @@ class ClawdbarDelegate(NSObject):
         self.statusItem.popUpStatusItemMenu_(menu)
 
     def refreshNow_(self, sender):
+        # Tell the daemon to re-poll the API now (not just re-read its cache).
+        # The daemon may relaunch itself if it detects a stale Keychain view, so
+        # the request can fail/reset — that's expected; the title poll recovers.
+        try:
+            with urllib.request.urlopen(REFRESH_URL, timeout=8):
+                pass
+        except Exception:
+            pass
         self.updateTitle_(None)
         if self.popover.isShown():
             self.webview.reload_(None)
@@ -242,22 +256,49 @@ class ClawdbarDelegate(NSObject):
         NSApp.terminate_(sender)
 
     def updateTitle_(self, timer):
-        pct = self._poll_session_pct()
+        pct, stale = self._poll_usage()
         button = self.statusItem.button()
         if pct is None:
-            button.setTitle_(" --%")
+            _set_bar_title(button, " --%", False)
+        elif stale:
+            # Keep showing the last-known % (dimmed + *) while the daemon waits
+            # for Claude Code to refresh the token, instead of blanking to --%.
+            _set_bar_title(button, f" {pct}%*", True)
         else:
-            button.setTitle_(f" {pct}%")
+            _set_bar_title(button, f" {pct}%", False)
 
-    def _poll_session_pct(self):
+    def _poll_usage(self):
+        """Return (session_pct, stale). pct is None only when truly no data.
+
+        When the daemon flags `stale`, it is serving the last good reading while
+        waiting for a token refresh — show it dimmed rather than blanking.
+        """
         try:
             with urllib.request.urlopen(USAGE_URL, timeout=8) as resp:
                 data = json.loads(resp.read().decode())
-            if not data.get("ok"):
-                return None
-            return data.get("session_pct", 0)
         except Exception:
-            return None
+            return None, False
+        pct = data.get("session_pct")
+        if data.get("ok"):
+            return (pct if pct is not None else 0), False
+        if data.get("stale") and pct is not None:
+            return pct, True
+        return None, False
+
+
+def _set_bar_title(button, text, dimmed):
+    """Set the status-bar title, dimmed (secondary label color) when stale.
+
+    Module-level on purpose: a method with underscores on an NSObject subclass
+    is registered as an Obj-C selector, which would mangle the argument count.
+    """
+    if dimmed:
+        attrs = {NSForegroundColorAttributeName: NSColor.secondaryLabelColor()}
+        button.setAttributedTitle_(
+            NSAttributedString.alloc().initWithString_attributes_(text, attrs)
+        )
+    else:
+        button.setTitle_(text)
 
 
 def main():

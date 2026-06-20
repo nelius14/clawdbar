@@ -41,6 +41,29 @@ def test_extract_access_token_empty():
     assert daemon._extract_access_token("{}") is None
 
 
+# ---- _extract_expires_at ------------------------------------------------
+
+def test_extract_expires_at_direct():
+    blob = json.dumps({"accessToken": "t", "expiresAt": 1_700_000_000_000})
+    assert daemon._extract_expires_at(blob) == 1_700_000_000.0  # ms → seconds
+
+
+def test_extract_expires_at_nested():
+    blob = json.dumps({"claudeAiOauth": {"expiresAt": 1_700_000_000_000}})
+    assert daemon._extract_expires_at(blob) == 1_700_000_000.0
+
+
+def test_extract_expires_at_regex_fallback():
+    blob = 'noise {"expiresAt": 1700000000000} more'
+    assert daemon._extract_expires_at(blob) == 1_700_000_000.0
+
+
+def test_extract_expires_at_missing():
+    assert daemon._extract_expires_at(json.dumps({"accessToken": "t"})) is None
+    assert daemon._extract_expires_at("") is None
+    assert daemon._extract_expires_at("not json, no field") is None
+
+
 # ---- utilization_pct / reset_minutes ------------------------------------
 
 def test_utilization_pct():
@@ -103,6 +126,119 @@ def test_state_from_headers_missing_defaults():
     assert st["session_pct"] == 0
     assert st["weekly_pct"] == 0
     assert st["status"] == "unknown"
+
+
+# ---- refresh_state / relaunch decision ----------------------------------
+
+def test_refresh_state_no_token(monkeypatch):
+    monkeypatch.setattr(daemon, "read_token", lambda: None)
+    st = daemon.refresh_state()
+    assert st["ok"] is False
+    assert "no token" in st["error"]
+
+
+def test_refresh_state_raises_on_persistent_rejection(monkeypatch):
+    # Same token read both times + always rejected → propagate AuthError so the
+    # caller can decide to relaunch.
+    monkeypatch.setattr(daemon, "read_token", lambda: "same-token")
+
+    def reject(token, timeout=20.0):
+        raise daemon.AuthError(401)
+
+    monkeypatch.setattr(daemon, "poll_api", reject)
+    with pytest.raises(daemon.AuthError):
+        daemon.refresh_state()
+
+
+def test_refresh_state_retries_with_rotated_token(monkeypatch):
+    tokens = iter(["old-token", "new-token"])
+    monkeypatch.setattr(daemon, "read_token", lambda: next(tokens))
+    seen = []
+
+    def poll(token, timeout=20.0):
+        seen.append(token)
+        if token == "old-token":
+            raise daemon.AuthError(401)
+        return {"ok": True, "session_pct": 5}
+
+    monkeypatch.setattr(daemon, "poll_api", poll)
+    st = daemon.refresh_state()
+    assert st["ok"] is True
+    assert seen == ["old-token", "new-token"]
+
+
+def test_token_should_be_valid(monkeypatch):
+    import time as _t
+    monkeypatch.setattr(daemon.sys, "platform", "darwin")
+    future = int((_t.time() + 3600) * 1000)
+    monkeypatch.setattr(daemon, "_read_keychain_blob",
+                        lambda: json.dumps({"accessToken": "t", "expiresAt": future}))
+    assert daemon.token_should_be_valid() is True
+
+    past = int((_t.time() - 3600) * 1000)
+    monkeypatch.setattr(daemon, "_read_keychain_blob",
+                        lambda: json.dumps({"accessToken": "t", "expiresAt": past}))
+    assert daemon.token_should_be_valid() is False
+
+
+# ---- graceful stale state (serve last-known data while token refreshes) -
+
+def _reset_poll_globals():
+    daemon._consecutive_auth_failures = 0
+    daemon._last_good_state = None
+    daemon._state.update({
+        "ok": False, "status": "unknown", "error": None, "last_updated": None,
+        "session_pct": 0, "weekly_pct": 0, "session_reset_min": None,
+        "weekly_reset_min": None, "source": "api", "stale": False,
+    })
+
+
+def test_state_from_headers_not_stale():
+    st = daemon.state_from_headers({}, now=1000)
+    assert st["stale"] is False
+
+
+def test_poll_and_update_serves_stale_after_failure(monkeypatch):
+    _reset_poll_globals()
+    good = {
+        "ok": True, "status": "allowed", "error": None, "last_updated": 1000,
+        "session_pct": 42, "weekly_pct": 7, "session_reset_min": 100,
+        "weekly_reset_min": 500, "source": "api", "stale": False,
+    }
+    calls = {"n": 0}
+
+    def fake_refresh():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return good
+        raise daemon.AuthError(401)
+
+    monkeypatch.setattr(daemon, "refresh_state", fake_refresh)
+    # Genuinely expired → no relaunch, just wait (the dark-window path).
+    monkeypatch.setattr(daemon, "token_should_be_valid", lambda: False)
+
+    daemon.poll_and_update()            # success → records last-good
+    s1 = daemon.poll_and_update()       # 1st failure
+    s2 = daemon.poll_and_update()       # 2nd consecutive failure
+
+    for s in (s1, s2):
+        assert s["ok"] is False
+        assert s["stale"] is True
+        assert s["session_pct"] == 42      # preserved, not zeroed to 0
+        assert s["weekly_pct"] == 7
+        assert s["last_updated"] == 1000   # last *success*, not the failure time
+        assert s["error"]
+
+
+def test_poll_and_update_error_without_prior_good_is_not_stale(monkeypatch):
+    _reset_poll_globals()
+    monkeypatch.setattr(daemon, "refresh_state",
+                        lambda: (_ for _ in ()).throw(daemon.AuthError(401)))
+    monkeypatch.setattr(daemon, "token_should_be_valid", lambda: False)
+    s = daemon.poll_and_update()
+    assert s["ok"] is False
+    assert s["stale"] is False             # nothing to fall back to
+    assert s["session_pct"] == 0
 
 
 # ---- safe_static_path (path-traversal guard) ----------------------------

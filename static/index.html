@@ -177,6 +177,18 @@
     100%    { opacity: 0.02; }
   } */
 
+  /* ── STALE BANNER ── (last-known data while waiting for token refresh) */
+  #stale-banner {
+    display: none;
+    font-size: 10px;
+    color: var(--amber);
+    letter-spacing: 0.04em;
+    line-height: 1.5;
+    text-align: center;
+    padding: 4px 10px 0;
+  }
+  #stale-banner.visible { display: block; }
+
   /* ── ERROR OVERLAY ── */
   #error-overlay {
     display: none;
@@ -231,6 +243,8 @@
       <circle cx="20.3" cy="7.7"  r="3.5"  fill="#d97c4a" style="animation:dot-chase 12s linear infinite;animation-delay:-1.0s"/>
     </svg> --><span id="spark"></span><span id="title-text">Connecting</span><span id="dots"></span></span>
   </div>
+
+  <div id="stale-banner"></div>
 
   <div class="card">
     <div class="card-row">
@@ -986,7 +1000,20 @@ function updateUI(data) {
     : 'Resets in —';
   document.getElementById('weekly-reset').textContent = wReset;
 
-  const { text, cls, dots } = statusLabel(data.status, data.ok !== false);
+  // Stale: daemon is serving the last good reading while waiting for Claude
+  // Code to refresh the token. Show the data dimmed with a banner, not an error.
+  const stale = data.ok === false && data.stale === true;
+  const banner = document.getElementById('stale-banner');
+  if (stale) {
+    banner.textContent = `Last updated ${fmtClock(data.last_updated)} — waiting for Claude Code to refresh token`;
+    banner.classList.add('visible');
+  } else {
+    banner.classList.remove('visible');
+  }
+
+  const { text, cls, dots } = stale
+    ? { text: 'Stale', cls: 'idle', dots: false }
+    : statusLabel(data.status, data.ok !== false);
   const st = document.getElementById('title');
   st.className = cls;
   document.getElementById('title-text').textContent = text;
@@ -997,6 +1024,13 @@ function updateUI(data) {
   if (!autoResyncTimer) syncToUsage();
 }
 
+// Format a unix-seconds timestamp as a local HH:MM clock for the stale banner.
+function fmtClock(ts) {
+  if (!ts) return '—';
+  const d = new Date(ts * 1000);
+  return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`;
+}
+
 // ═══════════════════════════════════════════════════════════
 // DATA FETCHING
 // ═══════════════════════════════════════════════════════════
@@ -1005,7 +1039,9 @@ async function fetchUsage() {
     const resp = await fetch('/usage', { cache: 'no-store' });
     if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
     const data = await resp.json();
-    if (!data.ok && data.error) throw new Error(data.error);
+    // Stale data is still renderable (dimmed + banner); only a hard error with
+    // no usable reading should fall through to the error overlay.
+    if (!data.ok && !data.stale) throw new Error(data.error || 'daemon not ok');
     updateUI(data);
   } catch (e) {
     const hasData = document.getElementById('session-pct').textContent !== '—';

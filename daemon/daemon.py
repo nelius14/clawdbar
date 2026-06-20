@@ -21,7 +21,6 @@ import sys
 import threading
 import time
 import urllib.error
-import urllib.parse
 import urllib.request
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
@@ -58,17 +57,15 @@ CREDENTIALS_PATH = Path(
     os.environ.get("CLAWDBAR_CREDENTIALS", str(Path.home() / ".claude" / ".credentials.json"))
 )
 
-# ── OAuth token refresh ──────────────────────────────────────────────
-OAUTH_TOKEN_URL = "https://platform.claude.com/v1/oauth/token"
-# Public client ID for Claude Code CLI (no secret required — PKCE flow).
-# Override with CLAWDBAR_OAUTH_CLIENT_ID if this ever changes.
-OAUTH_CLIENT_ID = os.environ.get(
-    "CLAWDBAR_OAUTH_CLIENT_ID", "9d1c250a-e61b-44d9-88ed-5944d1962f5e"
-)
-
-# In-memory cache for a freshly-refreshed token so it survives a stale Keychain.
-_token_cache: dict = {}
-_token_lock = threading.Lock()
+# ── Auto-relaunch on stale Keychain ──────────────────────────────────
+# A long-lived launchd process gets a stale view of the Keychain item: when
+# Claude Code rotates the OAuth token (~every 8h) the daemon's `security`
+# subprocess keeps returning the OLD token for this launchd session, so the
+# API 401/403s forever. A fresh process reads the current token fine. After
+# this many consecutive auth failures we exit; the plist's KeepAlive relaunches
+# us within ThrottleInterval (~10s) with a working Keychain session.
+# See docs/LOG.md 2026-06-19 for the full investigation.
+MAX_AUTH_FAILURES = 3
 
 # Shared state served at /usage
 _state_lock = threading.Lock()
@@ -82,6 +79,7 @@ _state: dict = {
     "session_reset_min": None,
     "weekly_reset_min": None,
     "source": "api",
+    "stale": False,
 }
 
 
@@ -116,116 +114,31 @@ def _extract_access_token(blob: str) -> str | None:
     return None
 
 
-def _extract_refresh_token(blob: str) -> str | None:
-    """Pull refreshToken from a credentials blob."""
-    blob = blob.strip()
-    if not blob:
+def _extract_expires_at(blob: str) -> float | None:
+    """Pull expiresAt from a credentials blob → unix seconds (or None).
+
+    Claude Code stores expiresAt as JS milliseconds, top-level or one dict deep.
+    """
+    if not blob or not blob.strip():
         return None
+    val = None
     try:
         data = json.loads(blob)
-    except json.JSONDecodeError:
-        return None
+    except (json.JSONDecodeError, TypeError):
+        data = None
     if isinstance(data, dict):
-        if isinstance(data.get("refreshToken"), str) and data["refreshToken"].strip():
-            return data["refreshToken"]
-        for v in data.values():
-            if isinstance(v, dict):
-                tok = v.get("refreshToken")
-                if isinstance(tok, str) and tok.strip():
-                    return tok
-    return None
-
-
-def _update_credentials_file(new_tokens: dict) -> None:
-    """Atomically write refreshed access/refresh tokens back to the credentials file."""
-    try:
-        raw = CREDENTIALS_PATH.read_text(encoding="utf-8")
-        data = json.loads(raw)
-    except Exception as e:
-        log.debug("Cannot read credentials for update: %s", e)
-        return
-
-    # Locate the dict that owns accessToken (top-level or one level deep).
-    if "accessToken" in data:
-        target = data
-    else:
-        target = next(
-            (v for v in data.values() if isinstance(v, dict) and "accessToken" in v),
-            None,
-        )
-    if target is None:
-        return
-
-    target["accessToken"] = new_tokens["access_token"]
-    if "refresh_token" in new_tokens:
-        target["refreshToken"] = new_tokens["refresh_token"]
-    if "expires_in" in new_tokens:
-        # Claude Code stores expiresAt as JS milliseconds.
-        target["expiresAt"] = int((time.time() + new_tokens["expires_in"]) * 1000)
-
-    tmp = CREDENTIALS_PATH.with_suffix(".json.tmp")
-    try:
-        tmp.write_text(json.dumps(data, indent=2), encoding="utf-8")
-        tmp.replace(CREDENTIALS_PATH)
-    except Exception as e:
-        log.warning("Could not persist refreshed tokens: %s", e)
-        tmp.unlink(missing_ok=True)
-
-
-def try_refresh_oauth_token() -> str | None:
-    """Use the stored refresh token to get a new access token.
-
-    On success, caches the token in memory and updates the credentials file.
-    Returns the new access token, or None if refresh is not possible.
-    """
-    refresh_tok = None
-    try:
-        raw = CREDENTIALS_PATH.read_text(encoding="utf-8")
-        refresh_tok = _extract_refresh_token(raw)
-    except OSError:
-        pass  # No credentials file; fall through to Keychain
-
-    if not refresh_tok and sys.platform == "darwin":
-        refresh_tok = read_refresh_token_keychain()
-
-    if not refresh_tok:
-        log.warning("No refresh token available — cannot auto-refresh")
-        return None
-
-    body = urllib.parse.urlencode({
-        "grant_type": "refresh_token",
-        "refresh_token": refresh_tok,
-        "client_id": OAUTH_CLIENT_ID,
-    }).encode()
-    req = urllib.request.Request(
-        OAUTH_TOKEN_URL,
-        data=body,
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
-        method="POST",
-    )
-    try:
-        with urllib.request.urlopen(req, timeout=20.0) as resp:
-            response = json.loads(resp.read())
-    except urllib.error.HTTPError as e:
-        log.warning("Token refresh HTTP %s: %s", e.code, e.read()[:200])
-        return None
-    except Exception as e:
-        log.warning("Token refresh failed: %s", e)
-        return None
-
-    access_token = response.get("access_token")
-    if not access_token:
-        log.warning("Token refresh response missing access_token")
-        return None
-
-    expires_in = response.get("expires_in", 3600)
-    with _token_lock:
-        _token_cache["token"] = access_token
-        _token_cache["expires_at"] = time.time() + expires_in - 60  # 60s safety buffer
-
-    _update_credentials_file(response)
-    log.info("OAuth token refreshed successfully (expires in %ss)", expires_in)
-    return access_token
+        if isinstance(data.get("expiresAt"), (int, float)):
+            val = data["expiresAt"]
+        else:
+            for v in data.values():
+                if isinstance(v, dict) and isinstance(v.get("expiresAt"), (int, float)):
+                    val = v["expiresAt"]
+                    break
+    if val is None:
+        m = re.search(r'"expiresAt"\s*:\s*(\d+)', blob)
+        if m:
+            val = int(m.group(1))
+    return val / 1000.0 if val is not None else None
 
 
 def _read_keychain_blob() -> str | None:
@@ -258,12 +171,6 @@ def read_token_keychain() -> str | None:
     return _extract_access_token(blob) if blob else None
 
 
-def read_refresh_token_keychain() -> str | None:
-    """Read Claude OAuth refresh token from macOS Keychain."""
-    blob = _read_keychain_blob()
-    return _extract_refresh_token(blob) if blob else None
-
-
 def read_token_file() -> str | None:
     """Read Claude OAuth token from the credentials file."""
     try:
@@ -275,19 +182,38 @@ def read_token_file() -> str | None:
 
 
 def read_token() -> str | None:
-    """Return the Claude OAuth access token, or None.
+    """Return the current Claude OAuth access token from Keychain (or file).
 
-    Checks the in-memory refresh cache first so a freshly-refreshed token
-    is used even if the Keychain still holds the old expired one.
+    No caching: Claude Code rotates the token in Keychain and we must always
+    read the latest. (Staleness is handled at the process level — see
+    MAX_AUTH_FAILURES.)
     """
-    with _token_lock:
-        if _token_cache.get("token") and time.time() < _token_cache.get("expires_at", 0):
-            return _token_cache["token"]
     if sys.platform == "darwin":
         tok = read_token_keychain()
         if tok:
             return tok
     return read_token_file()
+
+
+def token_should_be_valid(now: float | None = None) -> bool:
+    """True if the stored token's expiresAt is still in the future.
+
+    When the API rejects a token that *should* still be valid, this launchd
+    process is reading a stale Keychain view — a relaunch fixes it. If the
+    token is genuinely expired, relaunching won't help, so we just wait.
+    """
+    if now is None:
+        now = time.time()
+    blob = None
+    if sys.platform == "darwin":
+        blob = _read_keychain_blob()
+    if not blob:
+        try:
+            blob = CREDENTIALS_PATH.read_text(encoding="utf-8")
+        except OSError:
+            return False
+    exp = _extract_expires_at(blob) if blob else None
+    return exp is not None and exp > now
 
 
 def _hdr(headers: dict[str, str], name: str, default: str = "0") -> str:
@@ -332,6 +258,7 @@ def state_from_headers(headers: dict[str, str], now: float | None = None) -> dic
         "session_reset_min": reset_minutes(_hdr(headers, "anthropic-ratelimit-unified-5h-reset"), now),
         "weekly_reset_min": reset_minutes(_hdr(headers, "anthropic-ratelimit-unified-7d-reset"), now),
         "source": "api",
+        "stale": False,
     }
 
 
@@ -376,25 +303,49 @@ def _error_state(msg: str) -> dict:
         "session_reset_min": None,
         "weekly_reset_min": None,
         "source": "api",
+        "stale": False,
     }
 
 
+# Last successful /usage payload — lets us serve dimmed, clearly-dated data
+# instead of blanking the bar while we wait for Claude Code to refresh the token.
+_last_good_state: dict | None = None
+
+
+def _stale_payload(err: str) -> dict:
+    """Not-ok payload that preserves the last successful reading.
+
+    Keeps the last-known %s and the timestamp of the last *successful* poll, so
+    the menu bar can show "as of HH:MM" dimmed data rather than going dark
+    during a token-expiry gap. Falls back to a plain error state if we have
+    never had a good reading.
+    """
+    if _last_good_state is None:
+        return _error_state(err)
+    return {**_last_good_state, "ok": False, "stale": True, "error": err}
+
+
 def refresh_state() -> dict:
-    """Read token, poll API, return /usage payload. Auto-refreshes on 401."""
+    """Read token, poll API, return /usage payload.
+
+    Raises AuthError if the API rejects the token even after re-reading
+    Keychain (the caller decides whether to relaunch). Returns an error-state
+    dict for missing-token and transient network failures.
+    """
     token = read_token()
     if not token:
         return _error_state("no token — run `claude login`")
     try:
         return poll_api(token)
     except AuthError:
-        log.info("Access token rejected — attempting OAuth refresh")
-        new_token = try_refresh_oauth_token()
-        if new_token:
-            try:
-                return poll_api(new_token)
-            except AuthError:
-                pass
-        return _error_state("token expired — run `claude login`")
+        # Claude Code may have just rotated the token in Keychain — re-read once
+        # and retry before giving up. If the freshly-read token is identical and
+        # still rejected, this launchd process likely has a stale Keychain view;
+        # the caller relaunches us so a fresh process can read the live token.
+        fresh = read_token()
+        if fresh and fresh != token:
+            return poll_api(fresh)  # propagates AuthError if this also fails
+        raise
 
 
 # ── HTTP serving (loopback) ──────────────────────────────────────────
@@ -425,17 +376,41 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         pass  # suppress per-request logs
 
+    def _send_json(self, payload: dict):
+        data = json.dumps(payload).encode()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
     def do_GET(self):
         path = self.path.split("?", 1)[0]
         if path == "/usage":
             with _state_lock:
-                data = json.dumps(_state).encode()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json")
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+                snapshot = dict(_state)
+            self._send_json(snapshot)
+
+        elif path == "/refresh":
+            # Force an immediate re-poll (the menubar "Refresh Now" button).
+            # poll_and_update() updates _state and relaunches if it hits the
+            # stale-Keychain failure threshold. Respond first; if the token
+            # looks valid but was rejected, relaunch right away so the manual
+            # click actually recovers without waiting for the 3-strike loop.
+            try:
+                result = poll_and_update()
+            except Exception as e:
+                result = _error_state(f"refresh error: {e}")
+            with _state_lock:
+                snapshot = dict(_state)
+            self._send_json(snapshot)
+            if not result.get("ok") and token_should_be_valid():
+                threading.Thread(
+                    target=lambda: (time.sleep(0.3),
+                                    _relaunch("manual refresh with a valid-looking token")),
+                    daemon=True,
+                ).start()
 
         elif path in ("/", "/index.html"):
             serve_file(self, STATIC_DIR / "index.html", "text/html; charset=utf-8")
@@ -457,35 +432,85 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_error(404)
 
 
+# Consecutive auth failures across polls — drives the stale-Keychain relaunch.
+_consecutive_auth_failures = 0
+_auth_lock = threading.Lock()
+
+
+def _relaunch(reason: str) -> None:
+    """Hard-exit so launchd's KeepAlive relaunches us with a fresh process.
+
+    A fresh process gets a fresh Keychain session and reads the live token.
+    """
+    log.error("Relaunching daemon (%s) — launchd will restart with a fresh Keychain session", reason)
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(1)
+
+
+def poll_and_update() -> dict:
+    """Run one poll, update shared `_state`, and return the result dict.
+
+    On auth failure, counts consecutive failures and relaunches the process
+    after MAX_AUTH_FAILURES — but only if the stored token still looks valid
+    (future expiresAt), the signature of a stale Keychain view. If the token is
+    genuinely expired we just wait for Claude Code to refresh it.
+    """
+    global _consecutive_auth_failures, _last_good_state
+    try:
+        result = refresh_state()
+    except AuthError:
+        with _auth_lock:
+            _consecutive_auth_failures += 1
+            n = _consecutive_auth_failures
+        looks_valid = token_should_be_valid()
+        err = ("token rejected but Keychain says valid — stale view"
+               if looks_valid else "token expired — run `claude login`")
+        payload = _stale_payload(err)
+        with _state_lock:
+            _state.update(payload)
+        log.warning("Auth failed (%d/%d consecutive)%s", n, MAX_AUTH_FAILURES,
+                    " — token looks valid, will relaunch" if looks_valid else " — token genuinely expired")
+        if n >= MAX_AUTH_FAILURES and looks_valid:
+            _relaunch(f"{n} consecutive auth failures with a valid-looking token")
+        return payload
+
+    with _auth_lock:
+        _consecutive_auth_failures = 0
+    if result["ok"]:
+        _last_good_state = dict(result)
+    else:
+        # Transient (network/timeout) failure — keep showing last-known data.
+        result = _stale_payload(result["error"])
+    with _state_lock:
+        _state.update(result)
+    if result["ok"]:
+        log.info(
+            "Poll OK — session %s%% (%s) weekly %s%% — resets in %sm / %sm",
+            result["session_pct"], result["status"], result["weekly_pct"],
+            result["session_reset_min"], result["weekly_reset_min"],
+        )
+    else:
+        log.error("Poll failed: %s", result["error"])
+    return result
+
+
 def poll_loop():
     backoff = 5  # seconds; doubles on each failure up to POLL_INTERVAL
     while True:
         try:
-            result = refresh_state()
-            with _state_lock:
-                # Keep last good percentages on transient API errors
-                if not result["ok"] and _state.get("ok"):
-                    result = {**_state, "ok": False, "error": result["error"],
-                              "last_updated": result["last_updated"]}
-                _state.update(result)
-            if result["ok"]:
-                log.info(
-                    "Poll OK — session %s%% (%s) weekly %s%% — resets in %sm / %sm",
-                    result["session_pct"], result["status"], result["weekly_pct"],
-                    result["session_reset_min"], result["weekly_reset_min"],
-                )
-                backoff = 5
-                time.sleep(POLL_INTERVAL)
-            else:
-                log.error("Poll failed: %s", result["error"])
-                time.sleep(backoff)
-                backoff = min(backoff * 2, POLL_INTERVAL)
+            result = poll_and_update()
         except Exception as e:
-            log.error("Poll failed: %s", e)
+            log.error("Poll loop error: %s", e)
             with _state_lock:
                 _state["ok"] = False
                 _state["status"] = "error"
                 _state["error"] = str(e)
+            result = {"ok": False}
+        if result.get("ok"):
+            backoff = 5
+            time.sleep(POLL_INTERVAL)
+        else:
             time.sleep(backoff)
             backoff = min(backoff * 2, POLL_INTERVAL)
 
