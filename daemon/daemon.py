@@ -12,6 +12,7 @@ https://github.com/HermannBjorgvin/Clawdmeter — not a self-set budget.
 """
 
 import getpass
+import glob
 import json
 import logging
 import os
@@ -57,6 +58,14 @@ CREDENTIALS_PATH = Path(
     os.environ.get("CLAWDBAR_CREDENTIALS", str(Path.home() / ".claude" / ".credentials.json"))
 )
 
+# ── Activity gating ──────────────────────────────────────────────────
+# Only probe the API when Claude Code has been used recently. The OAuth token
+# only expires (and stays expired) while Claude Code is idle — probing then just
+# fails against a dead token AND would itself open/keep-alive a 5h window. So we
+# gate on transcript activity: active → probe; idle → serve the last reading.
+PROJECTS_DIR = os.environ.get("CLAWDBAR_PROJECTS", str(Path.home() / ".claude" / "projects"))
+ACTIVE_WINDOW = int(os.environ.get("CLAWDBAR_ACTIVE_WINDOW", "720"))  # seconds (12 min)
+
 # ── Auto-relaunch on stale Keychain ──────────────────────────────────
 # A long-lived launchd process gets a stale view of the Keychain item: when
 # Claude Code rotates the OAuth token (~every 8h) the daemon's `security`
@@ -78,8 +87,11 @@ _state: dict = {
     "weekly_pct": 0,
     "session_reset_min": None,
     "weekly_reset_min": None,
+    "session_reset_at": None,
+    "weekly_reset_at": None,
     "source": "api",
     "stale": False,
+    "idle": False,
 }
 
 
@@ -216,6 +228,36 @@ def token_should_be_valid(now: float | None = None) -> bool:
     return exp is not None and exp > now
 
 
+def latest_activity_mtime() -> float:
+    """Newest mtime among Claude Code transcript files, or 0.0 if none.
+
+    Cheap stat-only scan of ~/.claude/projects/**/*.jsonl. `agent-*` transcripts
+    are subagent runs, not user activity, so they're skipped.
+    """
+    newest = 0.0
+    for f in glob.glob(os.path.join(PROJECTS_DIR, "**", "*.jsonl"), recursive=True):
+        if os.path.basename(f).startswith("agent-"):
+            continue
+        try:
+            m = os.path.getmtime(f)
+        except OSError:
+            continue
+        if m > newest:
+            newest = m
+    return newest
+
+
+def is_active(now: float | None = None) -> bool:
+    """True if Claude Code wrote a transcript within ACTIVE_WINDOW seconds.
+
+    While active, Claude Code keeps the Keychain OAuth token fresh, so probing
+    succeeds. While idle the token expires — so we don't probe (see ACTIVE_WINDOW).
+    """
+    if now is None:
+        now = time.time()
+    return (now - latest_activity_mtime()) < ACTIVE_WINDOW
+
+
 def _hdr(headers: dict[str, str], name: str, default: str = "0") -> str:
     # HTTP headers are case-insensitive; normalize lookup.
     lower = name.lower()
@@ -235,6 +277,31 @@ def reset_minutes(reset_ts: str, now: float) -> int | None:
     return max(0, int(round(mins))) if mins > 0 else None
 
 
+def _epoch_or_none(reset_ts: str) -> int | None:
+    """Reset header (absolute epoch seconds) → int, or None if unparseable."""
+    try:
+        return int(float(reset_ts))
+    except (ValueError, TypeError):
+        return None
+
+
+def _with_live_resets(state: dict, now: float | None = None) -> dict:
+    """Recompute *_reset_min from the stored absolute *_reset_at epochs.
+
+    Keeps the "resets in" countdown live at serve-time (and between polls /
+    while idle), instead of freezing at whatever it was at the last poll.
+    """
+    if now is None:
+        now = time.time()
+    out = dict(state)
+    for at_key, min_key in (("session_reset_at", "session_reset_min"),
+                            ("weekly_reset_at", "weekly_reset_min")):
+        at = state.get(at_key)
+        if at is not None:
+            out[min_key] = reset_minutes(str(at), now)
+    return out
+
+
 def utilization_pct(util: str) -> int:
     """0.0–1.0 utilization header → integer percentage."""
     try:
@@ -248,6 +315,8 @@ def state_from_headers(headers: dict[str, str], now: float | None = None) -> dic
     if now is None:
         now = time.time()
     status = _hdr(headers, "anthropic-ratelimit-unified-5h-status", "unknown")
+    session_reset_at = _epoch_or_none(_hdr(headers, "anthropic-ratelimit-unified-5h-reset"))
+    weekly_reset_at = _epoch_or_none(_hdr(headers, "anthropic-ratelimit-unified-7d-reset"))
     return {
         "ok": True,
         "status": status,
@@ -257,8 +326,11 @@ def state_from_headers(headers: dict[str, str], now: float | None = None) -> dic
         "weekly_pct": utilization_pct(_hdr(headers, "anthropic-ratelimit-unified-7d-utilization")),
         "session_reset_min": reset_minutes(_hdr(headers, "anthropic-ratelimit-unified-5h-reset"), now),
         "weekly_reset_min": reset_minutes(_hdr(headers, "anthropic-ratelimit-unified-7d-reset"), now),
+        "session_reset_at": session_reset_at,
+        "weekly_reset_at": weekly_reset_at,
         "source": "api",
         "stale": False,
+        "idle": False,
     }
 
 
@@ -302,8 +374,11 @@ def _error_state(msg: str) -> dict:
         "weekly_pct": 0,
         "session_reset_min": None,
         "weekly_reset_min": None,
+        "session_reset_at": None,
+        "weekly_reset_at": None,
         "source": "api",
         "stale": False,
+        "idle": False,
     }
 
 
@@ -323,6 +398,20 @@ def _stale_payload(err: str) -> dict:
     if _last_good_state is None:
         return _error_state(err)
     return {**_last_good_state, "ok": False, "stale": True, "error": err}
+
+
+def _idle_payload() -> dict:
+    """Payload served while idle — last good reading, flagged idle, no error.
+
+    Idle is normal, not a failure: Claude Code hasn't been used recently so we
+    deliberately skip the API probe. Show the last-known data calmly (the
+    countdown still ticks via _with_live_resets at serve-time).
+    """
+    if _last_good_state is None:
+        # Nothing measured yet (e.g. daemon (re)started during an idle stretch).
+        base = _error_state("idle — no reading yet")
+        return {**base, "ok": True, "status": "idle", "error": None, "idle": True}
+    return {**_last_good_state, "ok": True, "stale": False, "idle": True, "error": None}
 
 
 def refresh_state() -> dict:
@@ -390,7 +479,9 @@ class Handler(BaseHTTPRequestHandler):
         if path == "/usage":
             with _state_lock:
                 snapshot = dict(_state)
-            self._send_json(snapshot)
+            # Recompute countdowns from absolute reset epochs so "resets in"
+            # stays live between polls and while idle.
+            self._send_json(_with_live_resets(snapshot))
 
         elif path == "/refresh":
             # Force an immediate re-poll (the menubar "Refresh Now" button).
@@ -436,6 +527,9 @@ class Handler(BaseHTTPRequestHandler):
 _consecutive_auth_failures = 0
 _auth_lock = threading.Lock()
 
+# Tracks idle⇄active transitions so we log them once, not every poll.
+_was_idle = False
+
 
 def _relaunch(reason: str) -> None:
     """Hard-exit so launchd's KeepAlive relaunches us with a fresh process.
@@ -456,7 +550,26 @@ def poll_and_update() -> dict:
     (future expiresAt), the signature of a stale Keychain view. If the token is
     genuinely expired we just wait for Claude Code to refresh it.
     """
-    global _consecutive_auth_failures, _last_good_state
+    global _consecutive_auth_failures, _last_good_state, _was_idle
+
+    # Activity gate: while Claude Code is idle the OAuth token expires, so a
+    # probe would just fail (and would itself keep a 5h window alive). Skip it
+    # and serve the last reading. We still probe if we have no reading yet.
+    if not is_active() and _last_good_state is not None:
+        with _auth_lock:
+            _consecutive_auth_failures = 0
+        payload = _idle_payload()
+        with _state_lock:
+            _state.update(payload)
+        if not _was_idle:
+            log.info("Idle — no Claude Code activity in %ds; pausing API probes, "
+                     "serving last reading (session %s%%)", ACTIVE_WINDOW, payload["session_pct"])
+            _was_idle = True
+        return payload
+    if _was_idle:
+        log.info("Active again — resuming API probes")
+        _was_idle = False
+
     try:
         result = refresh_state()
     except AuthError:

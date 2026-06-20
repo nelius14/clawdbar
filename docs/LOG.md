@@ -4,6 +4,27 @@ Append-only. One entry per work session.
 
 ---
 
+## 2026-06-20 (pm) — THE real fix: activity-gating (stop probing while idle)
+
+### Confirmed root cause of the recurring dark windows
+Caught a window live (`/usage` showed `stale:true` during 17:21–17:43) and proved the correlation with idle. Today's *only* Claude Code transcript writes were 00:50, 09:28, 17:47 — two idle stretches of ~8.5h. **Every** dark window (00:35, 08:51, 17:21) sat inside an idle stretch and recovered the moment activity resumed. The OAuth token expires ~8h after the last refresh; Claude Code only refreshes it while in use; our daemon kept probing every 60s into a dead token → dark.
+
+### Studied reference project (leechild4/claude-session-widget)
+It does **not** refresh tokens either (reads accessToken from Keychain, same as us). It avoids the outage two ways: (1) one-shot script every 10 min via launchd (fresh process = fresh Keychain), and (2) **only probes when a transcript changed in the last ~12 min** — "an idle Mac never pings (a call after the window expired would itself *open* a new window)." That's the key insight: probing while idle is both futile (dead token) AND incorrect (our own probes keep 5h windows alive).
+
+### Fix implemented (activity-gating, keeping our daemon architecture)
+- `latest_activity_mtime()` + `is_active()` scan `~/.claude/projects/**/*.jsonl` (excl. `agent-*`). New env `CLAWDBAR_ACTIVE_WINDOW` (default 720s) and `CLAWDBAR_PROJECTS`.
+- `poll_and_update()`: if `not is_active()` and we already have a reading, **skip the probe** and serve `_idle_payload()` (`ok:true, idle:true, stale:false`, last %s, no error, no auth-fail increment). Logs the idle⇄active transition once, not per poll. Still probes if there's no reading yet.
+- **Live countdown:** `state_from_headers` now stores absolute reset epochs (`session_reset_at`/`weekly_reset_at`); `/usage` runs `_with_live_resets()` at serve-time so "resets in" keeps ticking between polls and while idle (would otherwise freeze and look broken).
+- Menu bar needs no change (idle is `ok:true` → shows plain `%`). PWA: idle shows "Resting" + a muted "Idle — paused until you use Claude Code" banner instead of an error.
+- Tests: +6 (activity detection, idle-skips-probe, active-probes, live-reset recompute). 33 passing.
+- Verified live against deployed code: active path returns normal data + reset epochs; idle path (empty projects dir) serves last reading with no probe and a live countdown.
+
+### Net effect
+The dark windows you actually hit (token dead during long idle) disappear — the bar shows the last % calmly with a ticking countdown, and resumes live probing within ~60s of you using Claude Code again. Also fixes a correctness bug: our 60s polling was likely keeping 5h session windows artificially alive. (Self-refresh remains deliberately off the table.)
+
+---
+
 ## 2026-06-20 — A SECOND, distinct cause: genuine token-expiry gaps → graceful stale UX
 
 ### "It stops showing usage again" — but NOT the 06-19 stale-Keychain bug

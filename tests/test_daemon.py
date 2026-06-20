@@ -189,7 +189,8 @@ def _reset_poll_globals():
     daemon._state.update({
         "ok": False, "status": "unknown", "error": None, "last_updated": None,
         "session_pct": 0, "weekly_pct": 0, "session_reset_min": None,
-        "weekly_reset_min": None, "source": "api", "stale": False,
+        "weekly_reset_min": None, "source": "api", "stale": False, "idle": False,
+        "session_reset_at": None, "weekly_reset_at": None,
     })
 
 
@@ -239,6 +240,96 @@ def test_poll_and_update_error_without_prior_good_is_not_stale(monkeypatch):
     assert s["ok"] is False
     assert s["stale"] is False             # nothing to fall back to
     assert s["session_pct"] == 0
+
+
+# ---- activity gating (only probe when Claude Code is active) ------------
+
+def _make_transcript(dirpath, name, age_s):
+    import os, time as _t
+    p = dirpath / name
+    p.parent.mkdir(parents=True, exist_ok=True)
+    p.write_text("{}\n", encoding="utf-8")
+    t = _t.time() - age_s
+    os.utime(p, (t, t))
+    return p
+
+
+def test_latest_activity_mtime_newest_excludes_agents(monkeypatch, tmp_path):
+    import time as _t
+    proj = tmp_path / "projects"
+    _make_transcript(proj / "a", "old.jsonl", 3600)        # 1h old
+    _make_transcript(proj / "b", "recent.jsonl", 30)        # 30s old
+    _make_transcript(proj / "c", "agent-skip.jsonl", 1)     # newest but agent-* → ignored
+    monkeypatch.setattr(daemon, "PROJECTS_DIR", str(proj))
+    newest = daemon.latest_activity_mtime()
+    # newest non-agent file is ~30s old
+    assert _t.time() - newest < 60
+    assert _t.time() - newest > 10
+
+
+def test_latest_activity_mtime_empty_when_none(monkeypatch, tmp_path):
+    monkeypatch.setattr(daemon, "PROJECTS_DIR", str(tmp_path / "nope"))
+    assert daemon.latest_activity_mtime() == 0.0
+
+
+def test_is_active(monkeypatch, tmp_path):
+    proj = tmp_path / "projects"
+    monkeypatch.setattr(daemon, "PROJECTS_DIR", str(proj))
+    monkeypatch.setattr(daemon, "ACTIVE_WINDOW", 720)
+    _make_transcript(proj / "a", "x.jsonl", 60)             # 1 min ago → active
+    assert daemon.is_active() is True
+    _make_transcript(proj / "a", "x.jsonl", 3600)           # 1h ago → idle
+    assert daemon.is_active() is False
+
+
+def test_poll_and_update_idle_skips_probe(monkeypatch):
+    _reset_poll_globals()
+    daemon._last_good_state = {
+        "ok": True, "status": "allowed", "error": None, "last_updated": 1000,
+        "session_pct": 55, "weekly_pct": 12, "session_reset_min": 100,
+        "weekly_reset_min": 500, "source": "api", "stale": False, "idle": False,
+        "session_reset_at": None, "weekly_reset_at": None,
+    }
+    probed = {"n": 0}
+
+    def spy_refresh():
+        probed["n"] += 1
+        raise AssertionError("must not probe the API while idle")
+
+    monkeypatch.setattr(daemon, "refresh_state", spy_refresh)
+    monkeypatch.setattr(daemon, "is_active", lambda: False)
+
+    s = daemon.poll_and_update()
+    assert probed["n"] == 0                 # never called the API
+    assert s["ok"] is True
+    assert s["idle"] is True
+    assert s["stale"] is False
+    assert s["session_pct"] == 55           # last-known preserved
+    assert s["error"] is None
+    assert daemon._consecutive_auth_failures == 0
+
+
+def test_poll_and_update_active_probes(monkeypatch):
+    _reset_poll_globals()
+    good = daemon.state_from_headers({}, now=2000)
+    monkeypatch.setattr(daemon, "is_active", lambda: True)
+    monkeypatch.setattr(daemon, "refresh_state", lambda: good)
+    s = daemon.poll_and_update()
+    assert s["ok"] is True
+    assert s["idle"] is False
+
+
+def test_with_live_resets_recomputes_from_epoch():
+    now = 10_000.0
+    state = {
+        "session_reset_at": int(now + 3600),   # 60 min out
+        "weekly_reset_at": int(now + 120),     # 2 min out
+        "session_reset_min": 999,              # stale value to be overwritten
+        "weekly_reset_min": 999,
+    }
+    out = daemon._with_live_resets(state, now=now)
+    assert out["session_reset_min"] == 60
+    assert out["weekly_reset_min"] == 2
 
 
 # ---- safe_static_path (path-traversal guard) ----------------------------

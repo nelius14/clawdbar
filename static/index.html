@@ -188,6 +188,7 @@
     padding: 4px 10px 0;
   }
   #stale-banner.visible { display: block; }
+  #stale-banner.idle { color: var(--muted); }
 
   /* ── ERROR OVERLAY ── */
   #error-overlay {
@@ -1000,12 +1001,17 @@ function updateUI(data) {
     : 'Resets in —';
   document.getElementById('weekly-reset').textContent = wReset;
 
-  // Stale: daemon is serving the last good reading while waiting for Claude
-  // Code to refresh the token. Show the data dimmed with a banner, not an error.
+  // Stale: serving last good reading while waiting for a token refresh.
+  // Idle: deliberately paused (no recent Claude Code use) — normal, not an error.
   const stale = data.ok === false && data.stale === true;
+  const idle = data.idle === true;
   const banner = document.getElementById('stale-banner');
+  banner.classList.toggle('idle', idle && !stale);
   if (stale) {
     banner.textContent = `Last updated ${fmtClock(data.last_updated)} — waiting for Claude Code to refresh token`;
+    banner.classList.add('visible');
+  } else if (idle) {
+    banner.textContent = `Idle — last updated ${fmtClock(data.last_updated)}, paused until you use Claude Code`;
     banner.classList.add('visible');
   } else {
     banner.classList.remove('visible');
@@ -1013,7 +1019,9 @@ function updateUI(data) {
 
   const { text, cls, dots } = stale
     ? { text: 'Stale', cls: 'idle', dots: false }
-    : statusLabel(data.status, data.ok !== false);
+    : idle
+      ? { text: 'Resting', cls: 'idle', dots: false }
+      : statusLabel(data.status, data.ok !== false);
   const st = document.getElementById('title');
   st.className = cls;
   document.getElementById('title-text').textContent = text;
