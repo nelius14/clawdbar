@@ -15,6 +15,21 @@
     <key>WorkingDirectory</key>
     <string>/Users/REPLACE_USER/.clawdbar</string>
 
+    <!-- Tunable knobs (see CLAUDE.md / README). All optional; these are the
+         code defaults made explicit so they're easy to adjust in one place.
+         Edit a value, then: launchctl kickstart -k gui/$(id -u)/io.clawdbar -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>CLAWDBAR_POLL</key>
+        <string>60</string>
+        <key>CLAWDBAR_ACTIVE_WINDOW</key>
+        <string>720</string>
+        <key>CLAWDBAR_PROJECTS</key>
+        <string>/Users/REPLACE_USER/.claude/projects</string>
+        <key>CLAWDBAR_CREDENTIALS</key>
+        <string>/Users/REPLACE_USER/.claude/.credentials.json</string>
+    </dict>
+
     <key>RunAtLoad</key>
     <true/>
 
