@@ -208,11 +208,13 @@ class ClawdbarDelegate(NSObject):
         menu.setAutoenablesItems_(False)
 
         # Header: current usage (disabled label)
-        pct, stale = self._poll_usage()
+        pct, stale, idle = self._poll_usage()
         if pct is None:
             label = "Session: -- (no data)"
         elif stale:
             label = f"Session: {pct}% used (stale — waiting for token refresh)"
+        elif idle:
+            label = f"Session: {pct}% used (resting — Claude Code idle)"
         else:
             label = f"Session: {pct}% used"
         header = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(label, None, "")
@@ -240,9 +242,11 @@ class ClawdbarDelegate(NSObject):
         self.statusItem.popUpStatusItemMenu_(menu)
 
     def refreshNow_(self, sender):
-        # Tell the daemon to re-poll the API now (not just re-read its cache).
-        # The daemon may relaunch itself if it detects a stale Keychain view, so
-        # the request can fail/reset — that's expected; the title poll recovers.
+        # Tell the daemon to re-poll the API now (not just re-read its cache) —
+        # a forced probe that bypasses the idle gate, so this works even while
+        # resting. The daemon may relaunch itself if it detects a stale Keychain
+        # view, so the request can fail/reset — that's expected; the title poll
+        # recovers.
         try:
             with urllib.request.urlopen(REFRESH_URL, timeout=8):
                 pass
@@ -256,7 +260,7 @@ class ClawdbarDelegate(NSObject):
         NSApp.terminate_(sender)
 
     def updateTitle_(self, timer):
-        pct, stale = self._poll_usage()
+        pct, stale, idle = self._poll_usage()
         button = self.statusItem.button()
         if pct is None:
             _set_bar_title(button, " --%", False)
@@ -264,26 +268,33 @@ class ClawdbarDelegate(NSObject):
             # Keep showing the last-known % (dimmed + *) while the daemon waits
             # for Claude Code to refresh the token, instead of blanking to --%.
             _set_bar_title(button, f" {pct}%*", True)
+        elif idle:
+            # Resting: Claude Code has been idle, so the daemon paused probing
+            # and is serving the last reading. A moon marks the frozen % as
+            # intentionally at rest rather than broken.
+            _set_bar_title(button, f" {pct}% ☾", False)
         else:
             _set_bar_title(button, f" {pct}%", False)
 
     def _poll_usage(self):
-        """Return (session_pct, stale). pct is None only when truly no data.
+        """Return (session_pct, stale, idle). pct is None only when no data.
 
         When the daemon flags `stale`, it is serving the last good reading while
-        waiting for a token refresh — show it dimmed rather than blanking.
+        waiting for a token refresh — show it dimmed rather than blanking. When
+        it flags `idle`, probing is paused (Claude Code unused); the reading is
+        still good, just marked at rest.
         """
         try:
             with urllib.request.urlopen(USAGE_URL, timeout=8) as resp:
                 data = json.loads(resp.read().decode())
         except Exception:
-            return None, False
+            return None, False, False
         pct = data.get("session_pct")
         if data.get("ok"):
-            return (pct if pct is not None else 0), False
+            return (pct if pct is not None else 0), False, bool(data.get("idle"))
         if data.get("stale") and pct is not None:
-            return pct, True
-        return None, False
+            return pct, True, False
+        return None, False, False
 
 
 def _set_bar_title(button, text, dimmed):

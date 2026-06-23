@@ -167,20 +167,6 @@ def test_refresh_state_retries_with_rotated_token(monkeypatch):
     assert seen == ["old-token", "new-token"]
 
 
-def test_token_should_be_valid(monkeypatch):
-    import time as _t
-    monkeypatch.setattr(daemon.sys, "platform", "darwin")
-    future = int((_t.time() + 3600) * 1000)
-    monkeypatch.setattr(daemon, "_read_keychain_blob",
-                        lambda: json.dumps({"accessToken": "t", "expiresAt": future}))
-    assert daemon.token_should_be_valid() is True
-
-    past = int((_t.time() - 3600) * 1000)
-    monkeypatch.setattr(daemon, "_read_keychain_blob",
-                        lambda: json.dumps({"accessToken": "t", "expiresAt": past}))
-    assert daemon.token_should_be_valid() is False
-
-
 # ---- graceful stale state (serve last-known data while token refreshes) -
 
 def _reset_poll_globals():
@@ -215,8 +201,7 @@ def test_poll_and_update_serves_stale_after_failure(monkeypatch):
         raise daemon.AuthError(401)
 
     monkeypatch.setattr(daemon, "refresh_state", fake_refresh)
-    # Genuinely expired → no relaunch, just wait (the dark-window path).
-    monkeypatch.setattr(daemon, "token_should_be_valid", lambda: False)
+    # Two failures (< MAX_AUTH_FAILURES) → serve stale, no relaunch.
 
     daemon.poll_and_update()            # success → records last-good
     s1 = daemon.poll_and_update()       # 1st failure
@@ -235,7 +220,6 @@ def test_poll_and_update_error_without_prior_good_is_not_stale(monkeypatch):
     _reset_poll_globals()
     monkeypatch.setattr(daemon, "refresh_state",
                         lambda: (_ for _ in ()).throw(daemon.AuthError(401)))
-    monkeypatch.setattr(daemon, "token_should_be_valid", lambda: False)
     s = daemon.poll_and_update()
     assert s["ok"] is False
     assert s["stale"] is False             # nothing to fall back to
@@ -309,6 +293,32 @@ def test_poll_and_update_idle_skips_probe(monkeypatch):
     assert daemon._consecutive_auth_failures == 0
 
 
+def test_poll_and_update_force_probes_while_idle(monkeypatch):
+    # A manual "Refresh Now" (force=True) must probe for real even while idle,
+    # bypassing the activity gate, and clear the idle flag with the fresh read.
+    _reset_poll_globals()
+    daemon._last_good_state = {
+        "ok": True, "status": "allowed", "error": None, "last_updated": 1000,
+        "session_pct": 55, "weekly_pct": 12, "session_reset_min": 100,
+        "weekly_reset_min": 500, "source": "api", "stale": False, "idle": False,
+        "session_reset_at": None, "weekly_reset_at": None,
+    }
+    fresh = daemon.state_from_headers({}, now=2000)
+    probed = {"n": 0}
+
+    def spy_refresh():
+        probed["n"] += 1
+        return fresh
+
+    monkeypatch.setattr(daemon, "refresh_state", spy_refresh)
+    monkeypatch.setattr(daemon, "is_active", lambda: False)  # idle
+
+    s = daemon.poll_and_update(force=True)
+    assert probed["n"] == 1          # forced through the idle gate
+    assert s["ok"] is True
+    assert s["idle"] is False        # serving the fresh reading, not resting
+
+
 def test_poll_and_update_active_probes(monkeypatch):
     _reset_poll_globals()
     good = daemon.state_from_headers({}, now=2000)
@@ -317,6 +327,67 @@ def test_poll_and_update_active_probes(monkeypatch):
     s = daemon.poll_and_update()
     assert s["ok"] is True
     assert s["idle"] is False
+
+
+# ---- stale-Keychain relaunch (cooldown-gated, not expiresAt-gated) -------
+
+def test_should_relaunch_for_stale_view_cooldown(monkeypatch, tmp_path):
+    import time as _t
+    stamp = tmp_path / "last_relaunch"
+    monkeypatch.setattr(daemon, "RELAUNCH_STAMP", stamp)
+    monkeypatch.setattr(daemon, "RELAUNCH_COOLDOWN", 600)
+
+    # No stamp yet → a relaunch could help.
+    assert daemon._should_relaunch_for_stale_view() is True
+
+    # Just relaunched → within cooldown, a fresh process already failed → wait.
+    stamp.write_text(str(_t.time()))
+    assert daemon._should_relaunch_for_stale_view() is False
+
+    # Stamp older than the cooldown → worth retrying a relaunch.
+    stamp.write_text(str(_t.time() - 601))
+    assert daemon._should_relaunch_for_stale_view() is True
+
+
+def test_poll_and_update_relaunches_on_stale_view(monkeypatch, tmp_path):
+    # The historical bug: the relaunch was gated on the stored token's expiresAt,
+    # read from the *same* stale Keychain view — so it reported "expired" and the
+    # daemon never relaunched, staying dark for hours even though a fresh process
+    # would read a perfectly valid token. The relaunch must depend only on the
+    # cooldown, not on a re-read of the stale view.
+    _reset_poll_globals()
+    monkeypatch.setattr(daemon, "RELAUNCH_STAMP", tmp_path / "last_relaunch")
+    monkeypatch.setattr(daemon, "is_active", lambda: True)
+    monkeypatch.setattr(daemon, "refresh_state",
+                        lambda: (_ for _ in ()).throw(daemon.AuthError(401)))
+    relaunches = []
+    monkeypatch.setattr(daemon, "_relaunch", lambda reason: relaunches.append(reason))
+
+    for _ in range(daemon.MAX_AUTH_FAILURES):
+        daemon.poll_and_update()
+
+    assert len(relaunches) == 1
+
+
+def test_poll_and_update_no_relaunch_within_cooldown(monkeypatch, tmp_path):
+    # A fresh process that *still* can't authenticate this soon after a relaunch
+    # means the Keychain token is genuinely bad — relaunching won't help, so wait.
+    import time as _t
+    _reset_poll_globals()
+    stamp = tmp_path / "last_relaunch"
+    stamp.write_text(str(_t.time()))            # relaunched just now
+    monkeypatch.setattr(daemon, "RELAUNCH_STAMP", stamp)
+    monkeypatch.setattr(daemon, "RELAUNCH_COOLDOWN", 600)
+    monkeypatch.setattr(daemon, "is_active", lambda: True)
+    monkeypatch.setattr(daemon, "refresh_state",
+                        lambda: (_ for _ in ()).throw(daemon.AuthError(401)))
+    relaunches = []
+    monkeypatch.setattr(daemon, "_relaunch", lambda reason: relaunches.append(reason))
+
+    for _ in range(daemon.MAX_AUTH_FAILURES + 2):
+        daemon.poll_and_update()
+
+    assert relaunches == []
 
 
 def test_with_live_resets_recomputes_from_epoch():

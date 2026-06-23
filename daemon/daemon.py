@@ -75,6 +75,13 @@ ACTIVE_WINDOW = int(os.environ.get("CLAWDBAR_ACTIVE_WINDOW", "720"))  # seconds 
 # us within ThrottleInterval (~10s) with a working Keychain session.
 # See docs/LOG.md 2026-06-19 for the full investigation.
 MAX_AUTH_FAILURES = 3
+# Don't relaunch more than once per this window. A relaunch escapes a *stale*
+# Keychain view; but if a freshly-started process still can't authenticate this
+# soon afterward, the token is genuinely bad (Claude Code's own refresh is
+# failing) — relaunching can't fix that, so we wait instead of thrashing. The
+# stamp persists across the os._exit relaunch so the fresh process sees it.
+RELAUNCH_COOLDOWN = 600  # seconds (10 min)
+RELAUNCH_STAMP = Path.home() / ".clawdbar" / "last_relaunch"
 
 # Shared state served at /usage
 _state_lock = threading.Lock()
@@ -205,27 +212,6 @@ def read_token() -> str | None:
         if tok:
             return tok
     return read_token_file()
-
-
-def token_should_be_valid(now: float | None = None) -> bool:
-    """True if the stored token's expiresAt is still in the future.
-
-    When the API rejects a token that *should* still be valid, this launchd
-    process is reading a stale Keychain view — a relaunch fixes it. If the
-    token is genuinely expired, relaunching won't help, so we just wait.
-    """
-    if now is None:
-        now = time.time()
-    blob = None
-    if sys.platform == "darwin":
-        blob = _read_keychain_blob()
-    if not blob:
-        try:
-            blob = CREDENTIALS_PATH.read_text(encoding="utf-8")
-        except OSError:
-            return False
-    exp = _extract_expires_at(blob) if blob else None
-    return exp is not None and exp > now
 
 
 def latest_activity_mtime() -> float:
@@ -490,16 +476,16 @@ class Handler(BaseHTTPRequestHandler):
             # looks valid but was rejected, relaunch right away so the manual
             # click actually recovers without waiting for the 3-strike loop.
             try:
-                result = poll_and_update()
+                result = poll_and_update(force=True)
             except Exception as e:
                 result = _error_state(f"refresh error: {e}")
             with _state_lock:
                 snapshot = dict(_state)
             self._send_json(snapshot)
-            if not result.get("ok") and token_should_be_valid():
+            if not result.get("ok") and _should_relaunch_for_stale_view():
                 threading.Thread(
                     target=lambda: (time.sleep(0.3),
-                                    _relaunch("manual refresh with a valid-looking token")),
+                                    _relaunch("manual refresh — reload the Keychain")),
                     daemon=True,
                 ).start()
 
@@ -531,31 +517,71 @@ _auth_lock = threading.Lock()
 _was_idle = False
 
 
+def _relaunch_stamp_age(now: float | None = None) -> float | None:
+    """Seconds since the last relaunch, or None if we've never stamped one."""
+    if now is None:
+        now = time.time()
+    try:
+        return now - float(RELAUNCH_STAMP.read_text())
+    except (OSError, ValueError):
+        return None
+
+
+def _should_relaunch_for_stale_view(now: float | None = None) -> bool:
+    """True if relaunching could plausibly fix a stale Keychain view.
+
+    We relaunch to escape a stale Keychain view, but at most once per
+    RELAUNCH_COOLDOWN: if we relaunched recently and a *fresh* process still
+    can't authenticate, the Keychain token is genuinely bad and relaunching
+    won't help — so we wait for Claude Code to repair it. Crucially this never
+    reads the token's expiresAt from the same stale Keychain view it's trying to
+    escape (an earlier guard did, so it never fired in the very case it existed
+    for, leaving the bar dark for hours).
+    """
+    age = _relaunch_stamp_age(now)
+    return age is None or age >= RELAUNCH_COOLDOWN
+
+
 def _relaunch(reason: str) -> None:
     """Hard-exit so launchd's KeepAlive relaunches us with a fresh process.
 
     A fresh process gets a fresh Keychain session and reads the live token.
+    Records the relaunch time first (persisted across the exit) so the fresh
+    process can apply RELAUNCH_COOLDOWN and avoid thrashing on a genuinely bad
+    token.
     """
+    try:
+        RELAUNCH_STAMP.parent.mkdir(parents=True, exist_ok=True)
+        RELAUNCH_STAMP.write_text(str(time.time()))
+    except OSError as e:
+        log.warning("Could not write relaunch stamp %s: %s", RELAUNCH_STAMP, e)
     log.error("Relaunching daemon (%s) — launchd will restart with a fresh Keychain session", reason)
     sys.stdout.flush()
     sys.stderr.flush()
     os._exit(1)
 
 
-def poll_and_update() -> dict:
+def poll_and_update(force: bool = False) -> dict:
     """Run one poll, update shared `_state`, and return the result dict.
 
-    On auth failure, counts consecutive failures and relaunches the process
-    after MAX_AUTH_FAILURES — but only if the stored token still looks valid
-    (future expiresAt), the signature of a stale Keychain view. If the token is
-    genuinely expired we just wait for Claude Code to refresh it.
+    `force=True` bypasses the idle activity gate: a manual "Refresh Now" is an
+    explicit, attended user action, so we probe for real even while idle — that
+    single probe is negligible, and a forced probe is what surfaces (and lets us
+    recover from) a stale Keychain view when the user is staring at a stuck %.
+
+    On auth failure (reachable while Claude Code is active, or on a forced
+    refresh), counts consecutive failures and relaunches the process after
+    MAX_AUTH_FAILURES to escape a stale Keychain view — but at most once per
+    RELAUNCH_COOLDOWN, so a genuinely bad token doesn't trigger a relaunch loop
+    (see _should_relaunch_for_stale_view).
     """
     global _consecutive_auth_failures, _last_good_state, _was_idle
 
     # Activity gate: while Claude Code is idle the OAuth token expires, so a
-    # probe would just fail (and would itself keep a 5h window alive). Skip it
-    # and serve the last reading. We still probe if we have no reading yet.
-    if not is_active() and _last_good_state is not None:
+    # background probe would just fail (and would itself keep a 5h window alive).
+    # Skip it and serve the last reading. We still probe if we have no reading
+    # yet, or if the caller forced it (manual Refresh Now).
+    if not force and not is_active() and _last_good_state is not None:
         with _auth_lock:
             _consecutive_auth_failures = 0
         payload = _idle_payload()
@@ -576,16 +602,23 @@ def poll_and_update() -> dict:
         with _auth_lock:
             _consecutive_auth_failures += 1
             n = _consecutive_auth_failures
-        looks_valid = token_should_be_valid()
-        err = ("token rejected but Keychain says valid — stale view"
-               if looks_valid else "token expired — run `claude login`")
+        # We only get here while Claude Code is *active* (activity gate above),
+        # which means it's keeping the real Keychain token fresh — so a 401 is
+        # almost always this launchd process holding a stale Keychain view, which
+        # a relaunch fixes. The cooldown stops us thrashing if the token is
+        # genuinely bad (a fresh process would have recovered already).
+        relaunching = n >= MAX_AUTH_FAILURES and _should_relaunch_for_stale_view()
+        err = ("token rejected — reloading the Keychain in a fresh process"
+               if relaunching
+               else "token rejected — waiting for Claude Code to refresh it")
         payload = _stale_payload(err)
         with _state_lock:
             _state.update(payload)
         log.warning("Auth failed (%d/%d consecutive)%s", n, MAX_AUTH_FAILURES,
-                    " — token looks valid, will relaunch" if looks_valid else " — token genuinely expired")
-        if n >= MAX_AUTH_FAILURES and looks_valid:
-            _relaunch(f"{n} consecutive auth failures with a valid-looking token")
+                    " — relaunching to reload the Keychain" if relaunching
+                    else " — serving last reading, waiting for a fresh token")
+        if relaunching:
+            _relaunch(f"{n} consecutive auth failures while active — reload the Keychain")
         return payload
 
     with _auth_lock:
