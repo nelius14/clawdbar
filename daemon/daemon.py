@@ -708,14 +708,14 @@ def poll_and_update(force: bool = False) -> dict:
         with _auth_lock:
             _consecutive_auth_failures += 1
             n = _consecutive_auth_failures
-        # We only get here while Claude Code is *active* (activity gate above),
-        # which means it's keeping the real Keychain token fresh — so a 401 is
-        # almost always this launchd process holding a stale Keychain view, which
-        # a relaunch fixes. The cooldown stops us thrashing if the token is
-        # genuinely bad (a fresh process would have recovered already).
-        # Only a *fresh* token this process can't yet see justifies a relaunch —
-        # that's only possible while Claude Code is active. Expired + idle means
-        # no newer token exists, so serve waiting instead of thrashing.
+        # Auth errors are now reachable while active (normal poll) or idle (forced
+        # /refresh with force=True). The failure cause and recovery differ:
+        # - Active: 401 usually = stale Keychain view in this process (Claude Code
+        #   rotated the token but we read the old one). Relaunch = fresh session.
+        # - Idle: 401 = token genuinely expired; serve "waiting" instead of
+        #   relaunching, since only Claude Code can mint a new one.
+        # The is_active() gate below on relaunch respects this distinction. The
+        # cooldown prevents thrashing if the token is genuinely bad (not cached-stale).
         relaunching = (n >= MAX_AUTH_FAILURES and is_active()
                        and _should_relaunch_for_stale_view())
         err = ("token rejected — reloading the Keychain in a fresh process"
