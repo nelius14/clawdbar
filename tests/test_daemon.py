@@ -653,3 +653,22 @@ def test_safe_static_path_strips_query():
 
 def test_daemon_binds_loopback_only():
     assert daemon.HOST == "127.0.0.1"
+
+
+# ---- _credential_changed -------------------------------------------------
+
+def test_credential_changed_seeds_then_detects(monkeypatch):
+    daemon._last_seen_expires_at = None
+    vals = iter([5000.0, 5000.0, 9000.0])
+    monkeypatch.setattr(daemon, "token_expires_at", lambda: next(vals))
+    assert daemon._credential_changed() is False   # first call seeds
+    assert daemon._credential_changed() is False   # unchanged
+    assert daemon._credential_changed() is True    # Claude Code refreshed
+
+
+def test_credential_changed_read_failure_is_false(monkeypatch):
+    daemon._last_seen_expires_at = 5000.0
+    def boom():
+        raise RuntimeError("keychain locked")
+    monkeypatch.setattr(daemon, "token_expires_at", boom)
+    assert daemon._credential_changed() is False   # never crashes the poll loop

@@ -622,6 +622,9 @@ _auth_lock = threading.Lock()
 # Tracks idle⇄active transitions so we log them once, not every poll.
 _was_idle = False
 
+# Last-seen token expiry, for detecting a Claude Code refresh mid-outage.
+_last_seen_expires_at: float | None = None
+
 
 def _relaunch_stamp_age(now: float | None = None) -> float | None:
     """Seconds since the last relaunch, or None if we've never stamped one."""
@@ -752,9 +755,34 @@ def poll_and_update(force: bool = False) -> dict:
     return result
 
 
+def _credential_changed() -> bool:
+    """True once when the token's expiresAt changes (Claude Code minted a new one).
+
+    Seeds silently on the first call. Best-effort: any read error returns False so
+    the poll loop is never disrupted. Lets us re-probe the instant the credential
+    is refreshed instead of waiting for the activity gate.
+    """
+    global _last_seen_expires_at
+    try:
+        exp = token_expires_at()
+    except Exception as e:  # best-effort watcher, never crash the loop
+        log.debug("Credential-change check failed: %s", e)
+        return False
+    prev, _last_seen_expires_at = _last_seen_expires_at, exp
+    return prev is not None and exp is not None and exp != prev
+
+
 def poll_loop():
     backoff = 5  # seconds; doubles on each failure up to POLL_INTERVAL
     while True:
+        with _state_lock:
+            not_live = _state.get("stale") or _state.get("token_state") == "waiting_for_claude"
+        if not_live and _credential_changed():
+            log.info("Credential refreshed — re-probing now")
+            try:
+                poll_and_update(force=True)
+            except Exception as e:
+                log.error("Forced re-probe after credential change failed: %s", e)
         try:
             result = poll_and_update()
         except Exception as e:
