@@ -83,6 +83,13 @@ MAX_AUTH_FAILURES = 3
 RELAUNCH_COOLDOWN = 600  # seconds (10 min)
 RELAUNCH_STAMP = Path.home() / ".clawdbar" / "last_relaunch"
 
+# Persisted last-good reading. The auto-relaunch above (os._exit) wipes the
+# in-memory _last_good_state, which would defeat the graceful-stale UX exactly
+# when it's needed most: during a prolonged outage the bar would drop to --%
+# instead of the dimmed last-known %. Persisting it lets the fresh process
+# reload it and keep serving the last reading across the relaunch.
+LAST_GOOD_STATE_PATH = Path.home() / ".clawdbar" / "last_good_state.json"
+
 # Shared state served at /usage
 _state_lock = threading.Lock()
 _state: dict = {
@@ -373,6 +380,37 @@ def _error_state(msg: str) -> dict:
 _last_good_state: dict | None = None
 
 
+def _save_last_good_state(state: dict) -> None:
+    """Atomically persist the last successful reading so it survives a relaunch.
+
+    Written via a temp file + rename so a crash mid-write can't leave a
+    truncated/corrupt JSON behind. Best-effort: a failed write just means we
+    fall back to the in-memory value (and an error state only if we relaunch).
+    """
+    try:
+        LAST_GOOD_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+        tmp = LAST_GOOD_STATE_PATH.with_suffix(".tmp")
+        tmp.write_text(json.dumps(state))
+        tmp.replace(LAST_GOOD_STATE_PATH)
+    except OSError as e:
+        log.warning("Could not persist last-good state to %s: %s", LAST_GOOD_STATE_PATH, e)
+
+
+def _load_last_good_state() -> dict | None:
+    """Reload the persisted last-good reading, or None if absent/unusable.
+
+    Only an actually-good (`ok` + a session %) payload is a valid fallback; a
+    missing file, unreadable JSON, or a not-ok blob all yield None.
+    """
+    try:
+        data = json.loads(LAST_GOOD_STATE_PATH.read_text())
+    except (OSError, json.JSONDecodeError):
+        return None
+    if isinstance(data, dict) and data.get("ok") and data.get("session_pct") is not None:
+        return data
+    return None
+
+
 def _stale_payload(err: str) -> dict:
     """Not-ok payload that preserves the last successful reading.
 
@@ -625,6 +663,7 @@ def poll_and_update(force: bool = False) -> dict:
         _consecutive_auth_failures = 0
     if result["ok"]:
         _last_good_state = dict(result)
+        _save_last_good_state(_last_good_state)  # survive the auto-relaunch
     else:
         # Transient (network/timeout) failure — keep showing last-known data.
         result = _stale_payload(result["error"])
@@ -664,6 +703,16 @@ def poll_loop():
 if __name__ == "__main__":
     log.info("Clawdbar daemon starting on port %s (API poll every %ss)", PORT, POLL_INTERVAL)
     log.info("Credentials: Keychain [%s] then %s", KEYCHAIN_SERVICE, CREDENTIALS_PATH)
+
+    # Reload the last good reading persisted by a prior process. After an
+    # auto-relaunch mid-outage this is what keeps the bar on the dimmed
+    # last-known % instead of dropping to --% until the first poll lands. Seed
+    # _state as stale so /usage serves it immediately, before the first poll.
+    _last_good_state = _load_last_good_state()
+    if _last_good_state is not None:
+        _state.update(_stale_payload("reloaded after restart — waiting for next poll"))
+        log.info("Reloaded last good reading (session %s%%) from %s",
+                 _last_good_state["session_pct"], LAST_GOOD_STATE_PATH)
 
     t = threading.Thread(target=poll_loop, daemon=True)
     t.start()

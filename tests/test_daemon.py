@@ -15,6 +15,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "daemon"))
 import daemon  # noqa: E402
 
 
+@pytest.fixture(autouse=True)
+def _isolate_last_good_state(tmp_path, monkeypatch):
+    """Keep persisted-state writes out of the real ~/.clawdbar during tests."""
+    monkeypatch.setattr(daemon, "LAST_GOOD_STATE_PATH", tmp_path / "last_good_state.json")
+
+
 # ---- _extract_access_token ----------------------------------------------
 
 def test_extract_access_token_direct_json():
@@ -214,6 +220,81 @@ def test_poll_and_update_serves_stale_after_failure(monkeypatch):
         assert s["weekly_pct"] == 7
         assert s["last_updated"] == 1000   # last *success*, not the failure time
         assert s["error"]
+
+
+def test_save_and_load_last_good_state_roundtrip():
+    state = {
+        "ok": True, "status": "allowed", "error": None, "last_updated": 1000,
+        "session_pct": 42, "weekly_pct": 7, "session_reset_min": 100,
+        "weekly_reset_min": 500, "source": "api", "stale": False, "idle": False,
+        "session_reset_at": 1234, "weekly_reset_at": 5678,
+    }
+    daemon._save_last_good_state(state)
+    assert daemon._load_last_good_state() == state
+
+
+def test_load_last_good_state_missing_returns_none():
+    # autouse fixture points the path at a fresh tmp dir; nothing written yet.
+    assert daemon._load_last_good_state() is None
+
+
+def test_load_last_good_state_corrupt_returns_none():
+    daemon.LAST_GOOD_STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    daemon.LAST_GOOD_STATE_PATH.write_text("{ not json")
+    assert daemon._load_last_good_state() is None
+
+
+def test_load_last_good_state_rejects_non_good():
+    # A persisted not-ok payload is meaningless as a "last good" fallback.
+    daemon._save_last_good_state({"ok": False, "session_pct": 9})
+    assert daemon._load_last_good_state() is None
+
+
+def test_poll_and_update_persists_last_good_on_success(monkeypatch):
+    _reset_poll_globals()
+    good = daemon.state_from_headers({
+        "anthropic-ratelimit-unified-5h-utilization": "0.33",
+    }, now=2000)
+    monkeypatch.setattr(daemon, "is_active", lambda: True)
+    monkeypatch.setattr(daemon, "refresh_state", lambda: good)
+
+    daemon.poll_and_update()
+
+    persisted = daemon._load_last_good_state()
+    assert persisted is not None
+    assert persisted["session_pct"] == 33
+
+
+def test_stale_reading_survives_relaunch(monkeypatch):
+    # The actual bug: the auto-relaunch (os._exit) wipes the in-memory
+    # _last_good_state, so after a relaunch a still-failing token would drop the
+    # bar to --% instead of the dimmed last reading. Persisting + reloading it
+    # must let _stale_payload keep serving the last % across the relaunch.
+    _reset_poll_globals()
+    good = {
+        "ok": True, "status": "allowed", "error": None, "last_updated": 1000,
+        "session_pct": 88, "weekly_pct": 41, "session_reset_min": 100,
+        "weekly_reset_min": 500, "source": "api", "stale": False, "idle": False,
+        "session_reset_at": None, "weekly_reset_at": None,
+    }
+    daemon._save_last_good_state(good)
+
+    # Simulate the relaunch: fresh process → in-memory cache gone, reload disk.
+    daemon._last_good_state = None
+    daemon._last_good_state = daemon._load_last_good_state()
+
+    # Token still rejected after the relaunch (genuine outage continues).
+    monkeypatch.setattr(daemon, "RELAUNCH_STAMP", daemon.LAST_GOOD_STATE_PATH.parent / "last_relaunch")
+    monkeypatch.setattr(daemon, "is_active", lambda: True)
+    monkeypatch.setattr(daemon, "refresh_state",
+                        lambda: (_ for _ in ()).throw(daemon.AuthError(401)))
+    monkeypatch.setattr(daemon, "_relaunch", lambda reason: None)
+
+    s = daemon.poll_and_update()
+    assert s["ok"] is False
+    assert s["stale"] is True
+    assert s["session_pct"] == 88          # preserved across the relaunch
+    assert s["weekly_pct"] == 41
 
 
 def test_poll_and_update_error_without_prior_good_is_not_stale(monkeypatch):

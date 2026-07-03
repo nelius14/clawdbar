@@ -17,9 +17,12 @@ import base64
 import fcntl
 import json
 import os
+import subprocess
 import sys
 import urllib.request
 from pathlib import Path
+
+DAEMON_LABEL = "io.clawdbar"  # launchd label for the daemon LaunchAgent
 
 LOCK_FILE = Path.home() / ".clawdbar" / "menubar.lock"
 
@@ -45,6 +48,7 @@ from Cocoa import (
     NSViewController, NSView, NSTimer, NSImageLeft,
     NSApplicationActivationPolicyAccessory, NSRunLoop, NSDefaultRunLoopMode,
     NSMenu, NSMenuItem, NSColor, NSAttributedString, NSForegroundColorAttributeName,
+    NSWorkspace,
 )
 
 # NSEventMask constants (numeric to avoid PyObjC version issues)
@@ -183,6 +187,19 @@ class ClawdbarDelegate(NSObject):
         )
         NSRunLoop.currentRunLoop().addTimer_forMode_(self.timer, NSDefaultRunLoopMode)
 
+        # ── wake-from-sleep ──
+        # macOS suspends our poll timer while the Mac sleeps, so after wake the
+        # bar would show a stale % (or --%) until the next 60s tick. Listen for
+        # the workspace wake notification and force an immediate refresh so the
+        # reading reflects reality the moment the screen comes back. (Wake
+        # notifications post to NSWorkspace's own center, not the default one.)
+        NSWorkspace.sharedWorkspace().notificationCenter().addObserver_selector_name_object_(
+            self,
+            objc.selector(self.workspaceDidWake_, signature=b"v@:@"),
+            "NSWorkspaceDidWakeNotification",
+            None,
+        )
+
     # ── actions ──
     def togglePopover_(self, sender):
         event = NSApp.currentEvent()
@@ -230,6 +247,15 @@ class ClawdbarDelegate(NSObject):
         refresh.setTarget_(self)
         menu.addItem_(refresh)
 
+        # Reconnect — the bigger hammer when Refresh Now isn't enough: restart
+        # the daemon so a fresh process rebinds the port and reads a fresh
+        # Keychain session. Recovers both a dead daemon (--%) and a stuck token.
+        reconnect = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(
+            "Reconnect (restart daemon)", objc.selector(self.reconnect_, signature=b"v@:@"), ""
+        )
+        reconnect.setTarget_(self)
+        menu.addItem_(reconnect)
+
         menu.addItem_(NSMenuItem.separatorItem())
 
         # Quit
@@ -255,6 +281,43 @@ class ClawdbarDelegate(NSObject):
         self.updateTitle_(None)
         if self.popover.isShown():
             self.webview.reload_(None)
+
+    def reconnect_(self, sender):
+        # One-click recovery: restart the daemon LaunchAgent. `kickstart -k`
+        # kills the running daemon (if any) and starts a fresh one, which
+        # rebinds 127.0.0.1:7337 and gets a fresh Keychain session — fixing both
+        # a dead daemon (bar stuck on --%) and a stale-token view (dimmed %*)
+        # that Refresh Now alone can't clear. Then repaint once the daemon is
+        # back up. We show "…" meanwhile so the click visibly does something.
+        button = self.statusItem.button()
+        _set_bar_title(button, " …", False)
+        try:
+            subprocess.run(
+                ["/bin/launchctl", "kickstart", "-k", f"gui/{os.getuid()}/{DAEMON_LABEL}"],
+                check=False, capture_output=True, timeout=10,
+            )
+        except Exception:
+            pass
+        # The fresh daemon needs ~a second to rebind the port; refresh after.
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            2.0, self,
+            objc.selector(self.refreshNow_, signature=b"v@:@"),
+            None, False
+        )
+
+    def workspaceDidWake_(self, notification):
+        # Just woke from sleep — the poll timer was frozen, so force a refresh
+        # now instead of waiting up to 60s for the next tick. A forced refresh
+        # bypasses the daemon's idle gate and re-probes the API, which also
+        # surfaces a stale Keychain view after a long sleep. Wi-Fi may still be
+        # reconnecting, so schedule one delayed retry to catch a first probe
+        # that raced the network back up.
+        self.refreshNow_(None)
+        NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(
+            3.0, self,
+            objc.selector(self.refreshNow_, signature=b"v@:@"),
+            None, False
+        )
 
     def quit_(self, sender):
         NSApp.terminate_(sender)
