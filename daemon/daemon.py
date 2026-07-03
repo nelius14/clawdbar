@@ -327,6 +327,31 @@ def state_from_headers(headers: dict[str, str], now: float | None = None) -> dic
     }
 
 
+def _expire_windows(state: dict, now: float | None = None) -> dict:
+    """Zero a stale reading whose reset window has already elapsed.
+
+    A served stale/idle reading can outlive its own window (e.g. the 5h session
+    resets while the Mac sleeps), leaving the bar on a number that is no longer
+    just old but *wrong*. When `now` is at/after an absolute reset epoch, the
+    window has rolled over and genuinely starts at 0 — so zero the pct and clear
+    that window's reset fields. Absent reset epochs are left untouched (we can't
+    judge). Returns a copy; never mutates the input.
+    """
+    if now is None:
+        now = time.time()
+    out = dict(state)
+    for at_key, min_key, pct_key in (
+        ("session_reset_at", "session_reset_min", "session_pct"),
+        ("weekly_reset_at", "weekly_reset_min", "weekly_pct"),
+    ):
+        at = state.get(at_key)
+        if at is not None and now >= at:
+            out[pct_key] = 0
+            out[min_key] = None
+            out[at_key] = None
+    return out
+
+
 def poll_api(token: str, timeout: float = 20.0) -> dict:
     """POST a minimal message and return parsed rate-limit state.
 
@@ -421,7 +446,7 @@ def _stale_payload(err: str) -> dict:
     """
     if _last_good_state is None:
         return _error_state(err)
-    return {**_last_good_state, "ok": False, "stale": True, "error": err}
+    return _expire_windows({**_last_good_state, "ok": False, "stale": True, "error": err})
 
 
 def _idle_payload() -> dict:
@@ -435,7 +460,7 @@ def _idle_payload() -> dict:
         # Nothing measured yet (e.g. daemon (re)started during an idle stretch).
         base = _error_state("idle — no reading yet")
         return {**base, "ok": True, "status": "idle", "error": None, "idle": True}
-    return {**_last_good_state, "ok": True, "stale": False, "idle": True, "error": None}
+    return _expire_windows({**_last_good_state, "ok": True, "stale": False, "idle": True, "error": None})
 
 
 def refresh_state() -> dict:

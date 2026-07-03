@@ -191,6 +191,48 @@ def test_state_from_headers_not_stale():
     assert st["stale"] is False
 
 
+# ---- _expire_windows -----------------------------------------------------
+
+def _good(**over):
+    base = {
+        "ok": True, "status": "allowed", "error": None, "last_updated": 1000,
+        "session_pct": 24, "weekly_pct": 31, "session_reset_min": 5,
+        "weekly_reset_min": 500, "session_reset_at": 2000, "weekly_reset_at": 9000,
+        "source": "api", "stale": False, "idle": False, "token_state": "ok",
+    }
+    base.update(over)
+    return base
+
+
+def test_expire_windows_zeroes_elapsed_session():
+    # now is past session_reset_at (2000) but before weekly_reset_at (9000)
+    out = daemon._expire_windows(_good(), now=3000)
+    assert out["session_pct"] == 0
+    assert out["session_reset_min"] is None
+    assert out["session_reset_at"] is None
+    assert out["weekly_pct"] == 31          # weekly untouched
+    assert out["weekly_reset_at"] == 9000
+
+
+def test_expire_windows_zeroes_elapsed_weekly():
+    out = daemon._expire_windows(_good(), now=10000)
+    assert out["session_pct"] == 0          # both elapsed
+    assert out["weekly_pct"] == 0
+    assert out["weekly_reset_min"] is None
+    assert out["weekly_reset_at"] is None
+
+
+def test_expire_windows_noop_before_reset():
+    out = daemon._expire_windows(_good(), now=1500)
+    assert out == _good()                    # nothing elapsed → unchanged copy
+
+
+def test_expire_windows_noop_when_reset_at_absent():
+    st = _good(session_reset_at=None, weekly_reset_at=None)
+    out = daemon._expire_windows(st, now=10**12)
+    assert out == st                         # can't judge → leave as-is
+
+
 def test_poll_and_update_serves_stale_after_failure(monkeypatch):
     _reset_poll_globals()
     good = {
