@@ -286,6 +286,9 @@ def test_poll_and_update_serves_stale_after_failure(monkeypatch):
         raise daemon.AuthError(401)
 
     monkeypatch.setattr(daemon, "refresh_state", fake_refresh)
+    # Active so probes actually run (else the idle gate serves _idle_payload and
+    # refresh_state is never reached — CI has no ~/.claude/projects activity).
+    monkeypatch.setattr(daemon, "is_active", lambda: True)
     # Two failures (< MAX_AUTH_FAILURES) → serve stale, no relaunch.
 
     daemon.poll_and_update()            # success → records last-good
