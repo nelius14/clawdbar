@@ -17,4 +17,14 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Run tests
-        run: uv run --with pytest pytest -q
+        # Pin the daemon's host inputs to a known-empty state so the suite is
+        # reproducible and can't drift with whatever the runner happens to have:
+        # an empty projects dir makes is_active() deterministically False, and a
+        # nonexistent credentials path makes the file token read a clean miss.
+        # Reproduce a CI-faithful run locally with the same two env vars.
+        env:
+          CLAWDBAR_PROJECTS: ${{ runner.temp }}/clawdbar-empty-projects
+          CLAWDBAR_CREDENTIALS: ${{ runner.temp }}/clawdbar-nonexistent-credentials.json
+        run: |
+          mkdir -p "$CLAWDBAR_PROJECTS"
+          uv run --with pytest pytest -q
