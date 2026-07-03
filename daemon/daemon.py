@@ -106,6 +106,7 @@ _state: dict = {
     "source": "api",
     "stale": False,
     "idle": False,
+    "token_state": "ok",
 }
 
 
@@ -351,6 +352,7 @@ def state_from_headers(headers: dict[str, str], now: float | None = None) -> dic
         "source": "api",
         "stale": False,
         "idle": False,
+        "token_state": "ok",
     }
 
 
@@ -424,6 +426,7 @@ def _error_state(msg: str) -> dict:
         "source": "api",
         "stale": False,
         "idle": False,
+        "token_state": "ok",
     }
 
 
@@ -488,6 +491,19 @@ def _idle_payload() -> dict:
         base = _error_state("idle — no reading yet")
         return {**base, "ok": True, "status": "idle", "error": None, "idle": True}
     return _expire_windows({**_last_good_state, "ok": True, "stale": False, "idle": True, "error": None})
+
+
+def _waiting_payload() -> dict:
+    """Stale payload for the expired-token-while-idle case.
+
+    Distinct from _idle_payload (normal 'resting' moon): the token is genuinely
+    expired and only Claude Code can mint a new one, so we surface that honestly
+    instead of pretending to rest. Runs through _expire_windows via _stale_payload
+    so the number can't be wrong either.
+    """
+    payload = _stale_payload("token expired — waiting for Claude Code")
+    payload["token_state"] = "waiting_for_claude"
+    return payload
 
 
 def refresh_state() -> dict:
@@ -572,7 +588,7 @@ class Handler(BaseHTTPRequestHandler):
             with _state_lock:
                 snapshot = dict(_state)
             self._send_json(snapshot)
-            if not result.get("ok") and _should_relaunch_for_stale_view():
+            if not result.get("ok") and is_active() and _should_relaunch_for_stale_view():
                 threading.Thread(
                     target=lambda: (time.sleep(0.3),
                                     _relaunch("manual refresh — reload the Keychain")),
@@ -674,7 +690,7 @@ def poll_and_update(force: bool = False) -> dict:
     if not force and not is_active() and _last_good_state is not None:
         with _auth_lock:
             _consecutive_auth_failures = 0
-        payload = _idle_payload()
+        payload = _waiting_payload() if _token_expired() else _idle_payload()
         with _state_lock:
             _state.update(payload)
         if not _was_idle:
@@ -697,11 +713,15 @@ def poll_and_update(force: bool = False) -> dict:
         # almost always this launchd process holding a stale Keychain view, which
         # a relaunch fixes. The cooldown stops us thrashing if the token is
         # genuinely bad (a fresh process would have recovered already).
-        relaunching = n >= MAX_AUTH_FAILURES and _should_relaunch_for_stale_view()
+        # Only a *fresh* token this process can't yet see justifies a relaunch —
+        # that's only possible while Claude Code is active. Expired + idle means
+        # no newer token exists, so serve waiting instead of thrashing.
+        relaunching = (n >= MAX_AUTH_FAILURES and is_active()
+                       and _should_relaunch_for_stale_view())
         err = ("token rejected — reloading the Keychain in a fresh process"
                if relaunching
                else "token rejected — waiting for Claude Code to refresh it")
-        payload = _stale_payload(err)
+        payload = _stale_payload(err) if is_active() else _waiting_payload()
         with _state_lock:
             _state.update(payload)
         log.warning("Auth failed (%d/%d consecutive)%s", n, MAX_AUTH_FAILURES,

@@ -8,7 +8,7 @@ missing. Work top-down; most cases are fixed by the first one or two steps.
 | What the bar shows | What it means | Action |
 |---|---|---|
 | `5% ☾` (moon) | **Resting.** Claude Code has been idle, so the daemon paused API probes and is serving the last reading. This is normal, not a fault. | Nothing needed. Right-click → **Refresh Now** for a live number. |
-| `5%*` (dimmed + star) | **Stale token.** The daemon's last probe was rejected (OAuth token expired/rotated) and it's serving the last good reading while it waits. See the recurring Keychain issue in LOG.md. | Open Claude Code briefly (it refreshes the token), or right-click → **Refresh Now**. Usually self-heals. |
+| `5%*` (dimmed + star) | **Waiting for Claude Code.** The OAuth token expired (usually overnight — it lasts ~8h and nothing refreshes it while the Mac sleeps) and only Claude Code can mint a new one. The daemon serves the last reading, dimmed; if its window has since reset it shows `0%*`. `/usage` reports `"token_state": "waiting_for_claude"`. | Run any Claude Code command — it refreshes the token, and the bar recovers within a minute (the daemon watches the credential and re-probes the moment it changes). No relaunch needed. |
 | `--%` | The menu bar app is alive but got no data from the daemon — the daemon is likely down or not answering. | Go to step 2. |
 | **No icon at all** | The menu bar app itself isn't running. | Go to step 3 (restart). |
 

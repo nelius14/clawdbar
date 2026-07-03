@@ -386,6 +386,73 @@ def test_poll_and_update_error_without_prior_good_is_not_stale(monkeypatch):
     assert s["session_pct"] == 0
 
 
+# ---- waiting-for-claude state --------------------------------------------
+
+def test_poll_idle_expired_token_serves_waiting(monkeypatch):
+    _reset_poll_globals()
+    daemon._last_good_state = _good()
+    monkeypatch.setattr(daemon, "is_active", lambda: False)      # idle
+    monkeypatch.setattr(daemon, "_token_expired", lambda now=None: True)
+    spy = {"probed": False}
+    monkeypatch.setattr(daemon, "refresh_state",
+                        lambda: spy.__setitem__("probed", True) or _good())
+
+    payload = daemon.poll_and_update()
+
+    assert spy["probed"] is False                                # never probed
+    assert payload["token_state"] == "waiting_for_claude"
+    assert payload["ok"] is False and payload["stale"] is True
+    assert payload["error"] == "token expired — waiting for Claude Code"
+
+
+def test_poll_idle_valid_token_still_moon(monkeypatch):
+    _reset_poll_globals()
+    daemon._last_good_state = _good()
+    monkeypatch.setattr(daemon, "is_active", lambda: False)      # idle
+    monkeypatch.setattr(daemon, "_token_expired", lambda now=None: False)
+
+    payload = daemon.poll_and_update()
+
+    assert payload["idle"] is True
+    assert payload["token_state"] == "ok"                        # normal resting
+
+
+def test_auth_failure_while_idle_does_not_relaunch(monkeypatch):
+    # Forced refresh (e.g. wake) hits an expired token while Claude Code is idle:
+    # no fresh token can exist, so serve waiting and DON'T relaunch.
+    _reset_poll_globals()
+    daemon._last_good_state = _good()
+    monkeypatch.setattr(daemon, "is_active", lambda: False)      # idle
+    monkeypatch.setattr(daemon, "refresh_state",
+                        lambda: (_ for _ in ()).throw(daemon.AuthError(401)))
+    relaunched = {"n": 0}
+    monkeypatch.setattr(daemon, "_relaunch",
+                        lambda reason: relaunched.__setitem__("n", relaunched["n"] + 1))
+    monkeypatch.setattr(daemon, "_should_relaunch_for_stale_view", lambda now=None: True)
+
+    payload = daemon.poll_and_update(force=True)
+
+    assert relaunched["n"] == 0                                  # no futile relaunch
+    assert payload["token_state"] == "waiting_for_claude"
+
+
+def test_auth_failure_while_active_can_relaunch(monkeypatch):
+    _reset_poll_globals()
+    daemon._last_good_state = _good()
+    monkeypatch.setattr(daemon, "is_active", lambda: True)       # active → fresh token may exist
+    daemon._consecutive_auth_failures = daemon.MAX_AUTH_FAILURES - 1
+    monkeypatch.setattr(daemon, "refresh_state",
+                        lambda: (_ for _ in ()).throw(daemon.AuthError(401)))
+    relaunched = {"n": 0}
+    monkeypatch.setattr(daemon, "_relaunch",
+                        lambda reason: relaunched.__setitem__("n", relaunched["n"] + 1))
+    monkeypatch.setattr(daemon, "_should_relaunch_for_stale_view", lambda now=None: True)
+
+    daemon.poll_and_update(force=True)
+
+    assert relaunched["n"] == 1                                  # stale-view relaunch still works
+
+
 # ---- activity gating (only probe when Claude Code is active) ------------
 
 def _make_transcript(dirpath, name, age_s):
