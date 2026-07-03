@@ -630,6 +630,27 @@ def test_with_live_resets_recomputes_from_epoch():
     assert out["weekly_reset_min"] == 2
 
 
+# ---- _serve_payload (serve-time composition) -----------------------------
+
+def test_serve_payload_zeroes_window_that_reset_since_last_poll():
+    # Written while the session window was still open (pct 24, resets at 2000),
+    # but served after it elapsed (now=3000): the served pct must be 0, not 24.
+    st = _good(session_pct=24, session_reset_at=2000, session_reset_min=5)
+    out = daemon._serve_payload(st, now=3000)
+    assert out["session_pct"] == 0
+    assert out["session_reset_min"] is None
+    assert out["session_reset_at"] is None
+    assert out["weekly_pct"] == 31            # weekly window still open → untouched
+
+
+def test_serve_payload_keeps_live_countdown_before_reset():
+    # Before any reset: pct preserved, countdown recomputed live from reset_at.
+    st = _good(session_pct=24, session_reset_at=2000)
+    out = daemon._serve_payload(st, now=1400)   # 600s → 10 min to session reset
+    assert out["session_pct"] == 24
+    assert out["session_reset_min"] == 10
+
+
 # ---- safe_static_path (path-traversal guard) ----------------------------
 
 def test_safe_static_path_allows_normal_files():

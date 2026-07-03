@@ -323,6 +323,18 @@ def _with_live_resets(state: dict, now: float | None = None) -> dict:
     return out
 
 
+def _serve_payload(state: dict, now: float | None = None) -> dict:
+    """The dict /usage returns: live reset countdowns, and any elapsed window zeroed.
+
+    _expire_windows runs at write time inside poll_and_update, but a window can
+    reset between idle poll cycles; applying it again here guarantees /usage never
+    serves a pct whose window has already elapsed.
+    """
+    if now is None:
+        now = time.time()
+    return _expire_windows(_with_live_resets(state, now), now)
+
+
 def utilization_pct(util: str) -> int:
     """0.0–1.0 utilization header → integer percentage."""
     try:
@@ -573,7 +585,7 @@ class Handler(BaseHTTPRequestHandler):
                 snapshot = dict(_state)
             # Recompute countdowns from absolute reset epochs so "resets in"
             # stays live between polls and while idle.
-            self._send_json(_with_live_resets(snapshot))
+            self._send_json(_serve_payload(snapshot))
 
         elif path == "/refresh":
             # Force an immediate re-poll (the menubar "Refresh Now" button).
