@@ -70,6 +70,43 @@ def test_extract_expires_at_missing():
     assert daemon._extract_expires_at("not json, no field") is None
 
 
+# ---- token_expires_at / _token_expired -----------------------------------
+
+def test_token_expires_at_reads_keychain(monkeypatch):
+    blob = '{"claudeAiOauth": {"expiresAt": 5000000}}'  # ms → 5000.0 s
+    monkeypatch.setattr(daemon, "_read_keychain_blob", lambda: blob)
+    assert daemon.token_expires_at() == 5000.0
+
+
+def test_token_expires_at_falls_back_to_file(monkeypatch, tmp_path):
+    monkeypatch.setattr(daemon, "_read_keychain_blob", lambda: None)
+    cred = tmp_path / ".credentials.json"
+    cred.write_text('{"claudeAiOauth": {"expiresAt": 7000000}}')
+    monkeypatch.setattr(daemon, "CREDENTIALS_PATH", cred)
+    assert daemon.token_expires_at() == 7000.0
+
+
+def test_token_expires_at_none_when_absent(monkeypatch, tmp_path):
+    monkeypatch.setattr(daemon, "_read_keychain_blob", lambda: None)
+    monkeypatch.setattr(daemon, "CREDENTIALS_PATH", tmp_path / "nope.json")
+    assert daemon.token_expires_at() is None
+
+
+def test_token_expired_true_when_past(monkeypatch):
+    monkeypatch.setattr(daemon, "token_expires_at", lambda: 1000.0)
+    assert daemon._token_expired(now=2000.0) is True
+
+
+def test_token_expired_false_when_future(monkeypatch):
+    monkeypatch.setattr(daemon, "token_expires_at", lambda: 3000.0)
+    assert daemon._token_expired(now=2000.0) is False
+
+
+def test_token_expired_false_when_unknown(monkeypatch):
+    monkeypatch.setattr(daemon, "token_expires_at", lambda: None)
+    assert daemon._token_expired(now=2000.0) is False
+
+
 # ---- utilization_pct / reset_minutes ------------------------------------
 
 def test_utilization_pct():

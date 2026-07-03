@@ -221,6 +221,33 @@ def read_token() -> str | None:
     return read_token_file()
 
 
+def token_expires_at() -> float | None:
+    """OAuth token expiry (unix seconds) from Keychain, then the file. None if absent.
+
+    Same source order as read_token(). Best-effort and read-only: a stale
+    Keychain view can return a stale expiresAt, so callers use this only to
+    *suppress* futile work while idle, never as a correctness guarantee (the
+    stale-view relaunch machinery remains the backstop). Never logs the token.
+    """
+    blob = _read_keychain_blob()
+    exp = _extract_expires_at(blob) if blob else None
+    if exp is not None:
+        return exp
+    try:
+        raw = CREDENTIALS_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return None
+    return _extract_expires_at(raw)
+
+
+def _token_expired(now: float | None = None) -> bool:
+    """True only when a known expiry is at/before now. Unknown expiry → False."""
+    if now is None:
+        now = time.time()
+    exp = token_expires_at()
+    return exp is not None and exp <= now
+
+
 def latest_activity_mtime() -> float:
     """Newest mtime among Claude Code transcript files, or 0.0 if none.
 
