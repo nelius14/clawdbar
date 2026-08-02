@@ -1,92 +1,68 @@
-# Clawdmeter — Brief
+# Clawdbar — Brief
 
-Full architecture, decisions, and current state. CLAUDE.md points here; read this before non-trivial work. Session-by-session changes go in `docs/LOG.md`, not here.
+Architecture, decisions, and current state. CLAUDE.md points here; read this before non-trivial work. Session-by-session changes go in `docs/LOG.md`, not here.
 
 ## What this is
 
-Clawdmeter surfaces Claude usage in the macOS menu bar by polling **Anthropic's official rate-limit headers** — the same approach as [HermannBjorgvin/Clawdmeter](https://github.com/HermannBjorgvin/Clawdmeter). Two local processes run on one Mac:
+Clawdbar prints your official Claude.ai usage into the Claude Code status line:
 
-- a Python stdlib HTTP **daemon** that reads the Claude OAuth token, POSTs a minimal API probe, parses the unified 5h/7d utilization headers, and exposes them as JSON + serves the PWA;
-- a PyObjC **menu bar app** that shows the current session % beside a pixel Clawd icon and, on click, opens a popover hosting a WKWebView pointed at the daemon's PWA.
+```
+Opus 5 · 5h 62% · 7d 20%
+```
 
-Single user, single machine. The daemon binds loopback only; the only outbound network call is the minimal Anthropic API probe.
+One stdlib Python file. No processes, no dependencies, no credentials, no network.
 
 ## Architecture
 
 ```
-   macOS Keychain ("Claude Code-credentials")
-        or ~/.claude/.credentials.json
-                          │
-                          ▼
-   daemon.py ── POST /v1/messages (1 Haiku token)
-     │            parse response headers:
-     │              anthropic-ratelimit-unified-5h-utilization / -reset
-     │              anthropic-ratelimit-unified-7d-utilization / -reset
-     │              anthropic-ratelimit-unified-overage-utilization / -reset
-     │              anthropic-ratelimit-unified-representative-claim
-     │              anthropic-ratelimit-unified-status  (top-level; falls back to 5h-status)
-     │
-     ├─ GET /usage  → JSON {session_pct, weekly_pct, overage_pct, primary_pct,
-     │                      representative_claim, *_reset_min, status, ok, error}
-     └─ GET /       → static/index.html (the PWA)          [127.0.0.1:7337]
-                          ▲                    ▲
-        poll /usage 60s   │                    │ load PWA in WKWebView
-                  menubar/clawdbar_menubar.py (NSStatusItem + NSPopover)
+  Claude Code  ──(JSON on stdin, every status line render)──▶  clawdbar_statusline.py
+                                                                        │
+    {                                                                   ▼
+      "model": { "display_name": "Opus 5" },                    "Opus 5 · 5h 62% · 7d 20%"
+      "rate_limits": {                                           (stdout, one line)
+        "five_hour": { "used_percentage": 62, "resets_at": … },
+        "seven_day": { "used_percentage": 20, "resets_at": … }
+      }
+    }
 ```
 
-## How usage is derived
+That is the complete data flow. `render()` is pure; `main()` is a stdin wrapper that swallows errors.
 
-Every `CLAWDBAR_POLL` seconds (default 60):
+### Fields
 
-1. **Read token** from macOS Keychain (`Claude Code-credentials`) or, as fallback, `~/.claude/.credentials.json`. Extract `accessToken` from the JSON blob.
-2. **POST** to `https://api.anthropic.com/v1/messages` with a minimal body (Haiku, `max_tokens: 1`, message `"hi"`) — identical probe to upstream Clawdmeter.
-3. **Parse headers** into percentages and reset countdowns:
-   - `session_pct` ← `anthropic-ratelimit-unified-5h-utilization` × 100
-   - `weekly_pct` ← `anthropic-ratelimit-unified-7d-utilization` × 100
-   - `overage_pct` ← `anthropic-ratelimit-unified-overage-utilization` × 100 (extra-usage bucket; 0 for a plain subscription)
-   - `session_reset_min` / `weekly_reset_min` / `overage_reset_min` ← minutes until the matching `*-reset`
-   - `representative_claim` ← `anthropic-ratelimit-unified-representative-claim` (`five_hour` / `seven_day` / `overage`)
-   - `status` ← `anthropic-ratelimit-unified-status` (top-level; falls back to `5h-status` on the older schema)
-   - `primary_pct` ← the % of the **representative** window (falls back to `max(session, weekly)` when the claim is unknown). This is the single headline number the menu bar shows, so the bar auto-tracks whichever window is currently binding.
+`rate_limits` is optional — Claude Code documents it as *"Only present for subscribers after first API response"*, so a fresh session shows just the model until the first exchange. `seven_day` is independently optional. Both are handled by dropping the segment rather than rendering a placeholder.
 
-The bar percentages are **Anthropic's real subscription quota utilization**, not a self-set budget. Anthropic designates one window as *representative* (the binding constraint), so the menu bar follows `primary_pct` rather than always showing the 5h session; the PWA still breaks out each window as its own bar (overage shown only when active).
+`used_percentage` is **already 0–100**. The raw `anthropic-ratelimit-unified-*-utilization` headers the v0.1 daemon parsed were 0.0–1.0 and needed ×100. Scaling this one would pin the reading at 100%; there is a test named for it.
 
-Token counts and cost estimates are **not available** from these headers; the PWA shows "official quota" under each bar instead.
+There is no `overage` window and no `representative-claim` field here, both of which the raw headers carry. If you need those, they are not available through this seam.
 
-## Repository structure
+### Reset countdown
 
-```
-clawdbar/
-├── CLAUDE.md                            # project brief (always loaded)
-├── CLAUDE.local.md                      # machine-specific, gitignored
-├── CHANGELOG.md
-├── README.md                            # human-facing overview
-├── install.sh                           # build uv venv + icon, stage to ~/.clawdbar, load LaunchAgents
-├── io.clawdbar.plist                    # daemon LaunchAgent
-├── io.clawdbar.menubar.plist            # menu bar LaunchAgent
-├── daemon/daemon.py
-├── menubar/clawdbar_menubar.py
-├── static/                              # prebuilt PWA + generated icons
-├── tools/make_icon.py
-├── tests/test_daemon.py
-├── .claude/settings.json                # read-deny rules + pytest Stop hook
-├── docs/BRIEF.md                        # this file
-└── docs/LOG.md                          # append-only session log
-```
+Shown only when a window is at or above `RESET_HINT_AT` (default 80%). The design rule: surface the countdown when it is the number you would act on, and stay quiet otherwise. A `resets_at` in the past is treated as absent rather than rendered as a negative duration.
 
-## Key decisions
+## Why it looks like this (the v0.2.0 rewrite)
 
-- **API headers, not local transcripts.** Anthropic's unified rate-limit headers are the authoritative 5h/7d quota. Local JSONL parsing was replaced because it only saw locally-logged turns and used self-set budgets for the bar %.
-- **Same probe as upstream.** Minimal Haiku POST, OAuth token from Keychain, same header names — aligned with HermannBjorgvin/Clawdmeter.
-- **Loopback-only daemon.** Binds `127.0.0.1`. The menu bar WebView uses the IP (not `localhost`) so plain HTTP doesn't need an App Transport Security exception.
-- **Reuse the PWA.** The menu bar app is a thin shell; all UI lives in `static/index.html`. The pixel-animation engine is untouched; the data-binding layer reads `/usage`.
-- **uv, not pip.** Per global standing instructions. Venv at `~/.clawdbar/.venv`.
-- **Single machine.** Develop in your checkout; `install.sh` stages a runtime copy to `~/.clawdbar`.
+v0.1.x was a macOS menu bar app:
 
-## Known risks / open questions
+- a daemon read the Claude OAuth token from the Keychain (or `~/.claude/.credentials.json`),
+- POSTed a minimal Haiku request every 60 seconds purely to read the response headers,
+- parsed `anthropic-ratelimit-unified-5h/7d/overage-*`,
+- served JSON + a pixel-art PWA on `127.0.0.1:7337`,
+- and a PyObjC status item displayed the percentage, with two LaunchAgents keeping it all alive.
 
-- **Stale Keychain in the long-lived daemon (THE recurring outage — see LOG.md 2026-06-19).** A long-running launchd agent gets a stale view of the `Claude Code-credentials` Keychain item. When Claude Code rotates the OAuth access token (~every 8 h), the daemon's `security` subprocess keeps returning the **old** token for that launchd session → API 401/403 → daemon mislabels it "token expired" and never recovers. **Restarting the daemon fixes it instantly** (fresh Keychain session). This single bug produced three different-looking errors across sessions (Cloudflare 1010, rate-limit 429, "token expired"); the 1010/429 were the now-removed OAuth self-refresh fallback flailing on top. The OAuth self-refresh via `platform.claude.com` has never once succeeded and should not be reintroduced into the poll loop. Planned fix: exit on N consecutive auth failures so `KeepAlive` relaunches the daemon fresh, and give "Refresh Now" a real force-repoll/relaunch path. Diagnostic: if `/usage` says expired, check the Keychain token is actually valid (`expiresAt`) and probe it from a shell — if the shell gets 200, it's this staleness bug, so restart the daemon.
-- **API probe cost.** Each poll burns ~1 Haiku output token. Default 60s interval ≈ 1440 probes/day — negligible but non-zero.
-- **Header schema drift.** If Anthropic renames the unified rate-limit headers, usage drops to zero silently. Compare against `curl -i` on a manual probe if numbers look wrong.
-- **Keychain access under launchd.** The daemon LaunchAgent must be able to read `Claude Code-credentials` from Keychain. If poll fails with "no token" despite being logged in, check Keychain access for the Python binary.
-- **PyObjC under a uv venv + launchd.** Menu bar launch was never run end-to-end in chat; first real run on the Mac confirms it.
+It worked. It was also a scraper against surfaces Anthropic never promised, and the maintenance record shows it: **12 of the first 20 commits were repairs, 13 touched the daemon.** It went dark whenever an OAuth refresh failed (a Cloudflare 1010, then a 429, both in June 2026) and stayed dark until Claude Code happened to refresh the Keychain.
+
+The structural problem was not error handling. It was that the daemon had to *manufacture a request in order to observe a header* — it spent the quota it measured. Claude Code sees those headers as a side effect of work you were already doing, and now hands them to status line commands directly.
+
+**The rule this encodes:** to observe a system, ride traffic that already exists. Generating traffic in order to observe is the last resort, and it is the option that decays.
+
+## What not to rebuild
+
+Anything requiring a daemon, a LaunchAgent, the OAuth token, or an API probe. If a feature appears to need one, that is v0.1 repeating — flag it rather than building it.
+
+For usage attribution (what is *driving* consumption: cache misses, >150k context, subagent-heavy sessions, parallel sessions), Claude Code's built-in `/usage` already does this using data only the client holds. Don't reimplement it.
+
+## Risks
+
+- **The seam is documented but not versioned.** If Claude Code renames or drops `rate_limits`, the segment silently disappears and only the model name renders. That is the intended failure mode — quiet degradation, never a broken status line — but it also means breakage is easy to miss. The tests pin the field names.
+- **No staleness signal.** The line only updates when Claude Code renders it. Inherent to the seam and acceptable: if no session is open, there is no usage to watch.

@@ -2,6 +2,32 @@
 
 All notable changes to Clawdbar. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.0] — 2026-08-02
+
+Stripped to a Claude Code status line. **Breaking:** the menu bar app, the daemon, and both LaunchAgents are gone.
+
+### Added
+- `clawdbar_statusline.py`: the whole tool — reads Claude Code's status line JSON on stdin and prints `Opus 5 · 5h 62% · 7d 20%`. Stdlib only, no dependencies, no background process, no credentials, no network calls. Reset countdown appears only once a window passes `RESET_HINT_AT` (80%).
+- `tests/test_statusline.py`: 26 tests, including subprocess tests that invoke the hook exactly as Claude Code does, and cases pinning the guarantee that malformed input can never break the status line.
+
+### Removed
+- `daemon/daemon.py` — the loopback server, Keychain token read, Haiku API probe, and header parsing.
+- `menubar/clawdbar_menubar.py` — the PyObjC status item and WKWebView popover.
+- `static/` — the pixel-art PWA, icons, and animation engine.
+- `tools/make_icon.py`, `install.sh`, `io.clawdbar.plist`, `io.clawdbar.menubar.plist`, `tests/test_daemon.py`, `docs/TROUBLESHOOTING.md`.
+
+### Why
+Claude Code now passes official `rate_limits` (5h/7d `used_percentage` + `resets_at`) to status line commands, as a side effect of requests already being made. The daemon existed only to manufacture a request to read those same numbers from response headers — it spent the quota it measured, and 12 of the project's first 20 commits were repairs to that scraping layer. The seam moved; the machinery was no longer earning its keep. `docs/BRIEF.md` has the full reasoning.
+
+### Notes
+- CI moved from `macos-latest` to `ubuntu-latest` — nothing is macOS-specific now.
+- The working tree is original code only; the bundled claudepix sprites and Anthropic typeface loading are gone. `LICENSE` still describes the old situation and should be revisited before publishing.
+
+## [0.1.1] — 2026-08-02
+
+### Fixed
+- "Quit Clawdbar" relaunched instead of quitting. `io.clawdbar.menubar.plist` set `KeepAlive` to an unconditional `<true/>`, so launchd restarted the app after the clean `exit(0)` from `NSApp.terminate_()`. Gated on `SuccessfulExit` so a deliberate quit sticks while a crash still recovers. (Superseded by 0.2.0, which removes the LaunchAgent entirely.)
+
 ## [0.1.0] — 2026-06-14
 
 Initial public release as **Clawdbar**.

@@ -1,76 +1,93 @@
 # Clawdbar
 
-Claude usage in your macOS menu bar, read from **Anthropic's official rate-limit headers**.
+Claude usage in your Claude Code status line, from Anthropic's official numbers.
 
-![Clawdbar demo](assets/dashboard.gif)
+```
+Opus 5 · 5h 62% · 7d 20%
+```
 
-![Clawdbar demo 2](assets/approaching_limit.png)
+When a window gets close to its limit, the countdown you actually act on appears:
+
+```
+Opus 5 · 5h 91% (resets in 2h14m) · 7d 34%
+```
 
 ## What it does
 
-Clawdbar reads your live Claude quota from the same rate-limit headers that Claude Code monitors — no token counting, no local log parsing. A daemon on your Mac probes the API every 60 seconds; a menu bar app shows the current session % beside a pixel Clawd icon. Click to open a popover with the full usage animation, session (5h) and weekly (7d) bars, and reset countdowns.
+Claude Code pipes a JSON blob to its status line command on every render, and that blob already contains your official Claude.ai subscription usage under `rate_limits` — the same 5h/7d percentages Anthropic returns in its unified rate-limit headers.
+
+Clawdbar formats them. That's the whole tool: one stdlib Python file, no dependencies, no background process, no API calls, no credentials.
 
 ## Requirements
 
-- **macOS** (Apple Silicon or Intel)
-- **Claude Code** logged in on this Mac (`claude login`)
-- **uv** (`brew install uv`)
+- **Claude Code** with a Claude.ai subscription
+- **Python 3** (the system one is fine)
 
 ## Install
 
-```bash
-bash install.sh
+Clone anywhere, then point Claude Code at the script in `~/.claude/settings.json`:
+
+```json
+{
+  "statusLine": {
+    "type": "command",
+    "command": "/absolute/path/to/clawdbar/clawdbar_statusline.py"
+  }
+}
 ```
 
-One command. Builds a venv at `~/.clawdbar/.venv`, generates the menu bar icon, stages the project, and loads two LaunchAgents. The Clawd icon appears within a few seconds.
+Make sure it's executable (`chmod +x clawdbar_statusline.py`). New sessions pick it up immediately.
+
+`rate_limits` only arrives after a session's first API response, so a brand-new session shows just the model name until you send one message.
 
 ## Tuning
 
-Set these in the daemon plist's `EnvironmentVariables`, then re-run `install.sh`:
+Everything worth changing is a constant at the top of `clawdbar_statusline.py`:
 
-| Env var | Default | Meaning |
+| Constant | Default | Meaning |
 |---|---|---|
-| `CLAWDBAR_POLL` | `60` | Seconds between API polls |
-| `CLAWDBAR_CREDENTIALS` | `~/.claude/.credentials.json` | Credentials file (Keychain tried first) |
+| `RESET_HINT_AT` | `80` | Usage % above which the reset countdown appears |
+| `SEPARATOR` | `" · "` | Text between segments |
+| `WINDOWS` | 5h, 7d | Which windows to show, and their labels |
 
-## Daily use
+To add context-window usage, which Claude Code passes in the same blob:
 
-- **Menu bar:** pixel Clawd icon + current session %.
-- **Click:** popover with the live animation, session (5h) and weekly (7d) bars, reset countdowns, and "official quota" labels. Tap the animation to cycle through all 13 presets.
+```python
+remaining = (payload.get("context_window") or {}).get("remaining_percentage")
+if remaining is not None:
+    parts.append(f"ctx {round(remaining)}%")
+```
 
 ## Commands
 
 ```bash
-launchctl list | grep clawdbar                               # both agents should appear
-curl -s http://127.0.0.1:7337/usage | python3 -m json.tool  # check the daemon
-tail -F ~/Library/Logs/clawdbar.out.log                      # daemon logs
-tail -F ~/Library/Logs/clawdbar-menubar.err.log              # menu bar logs
-uv run --with pytest pytest -q                               # tests
-bash install.sh                                              # restart after edits
+uv run --with pytest pytest -q                    # tests
+echo '{"model":{"display_name":"Opus 5"},"rate_limits":{"five_hour":{"used_percentage":62}}}' \
+  | ./clawdbar_statusline.py                      # render a sample line
 ```
 
 ## Uninstall
 
-```bash
-launchctl unload ~/Library/LaunchAgents/io.clawdbar.plist
-launchctl unload ~/Library/LaunchAgents/io.clawdbar.menubar.plist
-rm -rf ~/.clawdbar \
-  ~/Library/LaunchAgents/io.clawdbar.plist \
-  ~/Library/LaunchAgents/io.clawdbar.menubar.plist
-```
+Remove the `statusLine` block from `~/.claude/settings.json`. There is nothing else — no agents, no daemon, no staged copy.
+
+## History
+
+Clawdbar started in June 2026 as a macOS menu bar app: a daemon read the Claude OAuth token from the Keychain, sent a minimal Haiku probe every 60 seconds, parsed the unified rate-limit headers, and served them to a PyObjC menu bar app over loopback.
+
+It worked, but it was a scraper against surfaces Anthropic never promised — 12 of its first 20 commits were repairs, most of them to the daemon, and it went dark whenever an OAuth refresh failed. It also spent the quota it measured.
+
+Claude Code later exposed the same official numbers directly to status line commands, which made all of that machinery unnecessary. v0.2.0 removed it. See `docs/BRIEF.md` for the reasoning and `git log` for the menu bar version, which remains in history at `282a7e9`.
+
+If you want the same numbers on demand rather than always-on, Claude Code's built-in `/usage` covers it, and breaks usage down by cause.
 
 ## Attribution
 
-- Inspired by [HermannBjorgvin/Clawdmeter](https://github.com/HermannBjorgvin/Clawdmeter) — same rate-limit header approach, clean rewrite.
-- Pixel-art Clawd animations by [@amaanbuilds](https://github.com/amaanbuilds), sourced from [claudepix.vercel.app](https://claudepix.vercel.app/). Frame data and palettes scraped and converted by the tooling in `tools/`.
+- Inspired by [HermannBjorgvin/Clawdmeter](https://github.com/HermannBjorgvin/Clawdmeter) — the original rate-limit header approach.
+- Earlier versions embedded pixel-art Clawd animations by [@amaanbuilds](https://github.com/amaanbuilds) from [claudepix.vercel.app](https://claudepix.vercel.app/). Those assets were removed in v0.2.0 and remain only in git history.
 - The Clawd character is Anthropic's mascot. This project is not affiliated with or endorsed by Anthropic.
 
 ## Legal
 
-This project sits in a licensing grey area and is intentionally not released under an open-source license.
+Earlier versions bundled third-party visual assets (claudepix sprites) and loaded proprietary Anthropic typefaces, which is why this repository carries a licensing notice rather than a standard open-source license — see `LICENSE`.
 
-The source code is original work. However, `static/index.html` embeds pixel-art Clawd sprites from claudepix (@amaanbuilds), the Clawd mascot is Anthropic's copyrighted character, and the Anthropic Sans/Serif fonts that the popover loads (if present on your system) are proprietary typefaces Anthropic holds a license for — none of which this project has explicit permission to use or redistribute.
-
-Because of these bundled third-party assets, applying a permissive or copyleft license to the repository as a whole would be misleading. You are free to read and adapt the code for personal use, but be aware that the visual assets carry third-party copyright. Obtain appropriate permissions before any commercial or large-scale redistribution.
-
-**You have been warned.**
+**As of v0.2.0 the working tree is original code only**: no sprites, no fonts, no mascot artwork. The notice has not been revised to reflect that, and the removed assets are still reachable in git history. Revisit `LICENSE` before publishing or relicensing.

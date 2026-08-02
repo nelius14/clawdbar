@@ -4,6 +4,37 @@ Append-only. One entry per work session.
 
 ---
 
+## 2026-08-02 — Quit fix, then stripped to a status line (v0.2.0)
+
+### The reported bug: "Quit always reloads"
+Right-clicking → Quit brought the app straight back. Nothing was wrong with `quit_()`: `NSApp.terminate_()` exits 0, correctly. **launchd was resurrecting it.** `io.clawdbar.menubar.plist` had `KeepAlive` as an unconditional `<true/>`, which restarts on *any* exit, including a deliberate one.
+
+Evidence: `launchctl print` showed `properties = keepalive | runatload`; terminating the app moved it from pid 81387 → 81688 with `runs` 1 → 2 in under a second. An isolated PyObjC probe confirmed `NSApp.terminate_()` exits 0 — the fix depended on that.
+
+Fix: `KeepAlive = { SuccessfulExit = false }`. Verified by sending the real `kAEQuitApplication` event (the same `terminate:` path the menu item uses): exit code 0, no relaunch in 20s; SIGKILL still restarted after the throttle. Committed as `282a7e9`.
+
+The generalizable version: when a process won't stay dead, read the supervisor's policy, not the process's code. `restart: always` and "restart on failure" look like the same intent and are not.
+
+### The bigger finding
+Checking whether the tool was still worth maintaining, searched the installed Claude Code 2.1.220 binary and found it now ships both halves of Clawdbar's premise:
+
+- **`/usage`** (aliases `/cost`, `/stats`) — *"Show session cost, plan usage, and what's contributing to your limits"* — with attribution Clawdbar never had (cache misses, >150k context, subagent-heavy, 4+ parallel sessions, 8h+ crons).
+- **Status line JSON** carrying `rate_limits.five_hour/seven_day.{used_percentage,resets_at}` — the same official numbers the daemon reconstructed by probing.
+
+Maintenance record for context: 20 commits, 12 fix-shaped, 13 touching the daemon. That ratio is the signature of scraping a private surface, not of bad code.
+
+### The decision
+Prototyped a statusline-fed menu bar first (source flag, daemon retained for comparison; verified the bar ran with the daemon fully booted out). Then went further: **stripped to status line only.**
+
+Removed the daemon, menu bar app, PWA, icon tooling, installer, both LaunchAgents, and their tests. Tore down the installed runtime — both agents unloaded, plists deleted, `~/.clawdbar` removed, port 7337 confirmed dead. What remains is `clawdbar_statusline.py`: one stdlib file, 26 tests.
+
+The insight worth keeping: the daemon had to **manufacture a request in order to observe a header** — it spent the quota it measured. Claude Code sees those headers as a side effect of work already happening. To observe a system, ride existing traffic; generating traffic to observe is the option that decays.
+
+### Gotcha for future work
+`used_percentage` is already 0–100. The old headers were 0.0–1.0 and needed ×100. Scaling this one pins the reading at 100%.
+
+---
+
 ## 2026-08-02 — Anthropic's unified rate-limit headers grew: representative-claim + overage
 
 ### What changed on Anthropic's side

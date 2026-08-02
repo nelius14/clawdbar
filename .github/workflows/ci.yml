@@ -8,7 +8,11 @@ on:
 
 jobs:
   test:
-    runs-on: macos-latest
+    # The status line is stdlib-only and platform-agnostic, so ubuntu is just
+    # the cheapest runner. This needed macOS back when a daemon read the
+    # Keychain; nothing here touches host state any more, which is also why
+    # the CLAWDBAR_PROJECTS / CLAWDBAR_CREDENTIALS pinning is gone.
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
@@ -17,14 +21,4 @@ jobs:
         uses: astral-sh/setup-uv@v4
 
       - name: Run tests
-        # Pin the daemon's host inputs to a known-empty state so the suite is
-        # reproducible and can't drift with whatever the runner happens to have:
-        # an empty projects dir makes is_active() deterministically False, and a
-        # nonexistent credentials path makes the file token read a clean miss.
-        # Reproduce a CI-faithful run locally with the same two env vars.
-        env:
-          CLAWDBAR_PROJECTS: ${{ runner.temp }}/clawdbar-empty-projects
-          CLAWDBAR_CREDENTIALS: ${{ runner.temp }}/clawdbar-nonexistent-credentials.json
-        run: |
-          mkdir -p "$CLAWDBAR_PROJECTS"
-          uv run --with pytest pytest -q
+        run: uv run --with pytest pytest -q
