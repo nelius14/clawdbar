@@ -69,6 +69,9 @@ POPOVER_H = 260  # tight-fit: header (40px) + 2 cards, no footer
 
 ICON_PATH = Path(__file__).parent.parent / "static" / "clawd_icon.png"
 
+# Friendly name for Anthropic's representative-claim window (drives the menu header).
+_CLAIM_LABEL = {"five_hour": "Session", "seven_day": "Weekly", "overage": "Overage"}
+
 # ── font injection ────────────────────────────────────────────────────
 def _font_face_css() -> str:
     """Build @font-face CSS with fonts embedded as base64 data URIs."""
@@ -104,6 +107,17 @@ class _NavDelegate(NSObject):
         return self
 
     def webView_didFinishNavigation_(self, webview, navigation):
+        self._measure()
+        # The PWA fetches /usage asynchronously *after* the page loads, so a card
+        # that only appears with data (the overage card) isn't in the DOM at the
+        # first measure. Re-measure a beat later so the popover grows to fit it
+        # instead of clipping — a no-op for the common (no-overage) case.
+        self.performSelector_withObject_afterDelay_("remeasure:", None, 0.6)
+
+    def remeasure_(self, _arg):
+        self._measure()
+
+    def _measure(self):
         popover = self._popover
         wv = self._webview
         width = self._width
@@ -114,7 +128,7 @@ class _NavDelegate(NSObject):
                 popover.setContentSize_(NSMakeSize(width, h))
                 wv.setFrame_(NSMakeRect(0, 0, width, h))
 
-        webview.evaluateJavaScript_completionHandler_(
+        self._webview.evaluateJavaScript_completionHandler_(
             "document.getElementById('app').scrollHeight",
             _resize,
         )
@@ -224,16 +238,18 @@ class ClawdbarDelegate(NSObject):
         menu = NSMenu.alloc().init()
         menu.setAutoenablesItems_(False)
 
-        # Header: current usage (disabled label)
-        pct, stale, idle = self._poll_usage()
+        # Header: current usage (disabled label). The number tracks Anthropic's
+        # representative (binding) window, so name it — Session / Weekly / Overage.
+        pct, stale, idle, claim = self._poll_usage()
+        name = _CLAIM_LABEL.get(claim, "Session")
         if pct is None:
-            label = "Session: -- (no data)"
+            label = f"{name}: -- (no data)"
         elif stale:
-            label = f"Session: {pct}% used (stale — waiting for token refresh)"
+            label = f"{name}: {pct}% used (stale — waiting for token refresh)"
         elif idle:
-            label = f"Session: {pct}% used (resting — Claude Code idle)"
+            label = f"{name}: {pct}% used (resting — Claude Code idle)"
         else:
-            label = f"Session: {pct}% used"
+            label = f"{name}: {pct}% used"
         header = NSMenuItem.alloc().initWithTitle_action_keyEquivalent_(label, None, "")
         header.setEnabled_(False)
         menu.addItem_(header)
@@ -323,7 +339,7 @@ class ClawdbarDelegate(NSObject):
         NSApp.terminate_(sender)
 
     def updateTitle_(self, timer):
-        pct, stale, idle = self._poll_usage()
+        pct, stale, idle, _claim = self._poll_usage()
         button = self.statusItem.button()
         if pct is None:
             _set_bar_title(button, " --%", False)
@@ -340,8 +356,11 @@ class ClawdbarDelegate(NSObject):
             _set_bar_title(button, f" {pct}%", False)
 
     def _poll_usage(self):
-        """Return (session_pct, stale, idle). pct is None only when no data.
+        """Return (primary_pct, stale, idle, claim). pct is None only when no data.
 
+        `primary_pct` is the % of Anthropic's representative (binding) window —
+        session / weekly / overage — so the bar auto-tracks whichever limit is
+        actually constraining you (falls back to session_pct for an older daemon).
         When the daemon flags `stale`, it is serving the last good reading while
         waiting for a token refresh — show it dimmed rather than blanking. When
         it flags `idle`, probing is paused (Claude Code unused); the reading is
@@ -351,13 +370,16 @@ class ClawdbarDelegate(NSObject):
             with urllib.request.urlopen(USAGE_URL, timeout=8) as resp:
                 data = json.loads(resp.read().decode())
         except Exception:
-            return None, False, False
-        pct = data.get("session_pct")
+            return None, False, False, "unknown"
+        pct = data.get("primary_pct")
+        if pct is None:
+            pct = data.get("session_pct")
+        claim = data.get("representative_claim", "unknown")
         if data.get("ok"):
-            return (pct if pct is not None else 0), False, bool(data.get("idle"))
+            return (pct if pct is not None else 0), False, bool(data.get("idle")), claim
         if data.get("stale") and pct is not None:
-            return pct, True, False
-        return None, False, False
+            return pct, True, False, claim
+        return None, False, False, claim
 
 
 def _set_bar_title(button, text, dimmed):

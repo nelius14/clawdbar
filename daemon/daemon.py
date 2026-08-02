@@ -99,10 +99,15 @@ _state: dict = {
     "last_updated": None,
     "session_pct": 0,
     "weekly_pct": 0,
+    "overage_pct": 0,
     "session_reset_min": None,
     "weekly_reset_min": None,
+    "overage_reset_min": None,
     "session_reset_at": None,
     "weekly_reset_at": None,
+    "overage_reset_at": None,
+    "representative_claim": "unknown",
+    "primary_pct": 0,
     "source": "api",
     "stale": False,
     "idle": False,
@@ -316,7 +321,8 @@ def _with_live_resets(state: dict, now: float | None = None) -> dict:
         now = time.time()
     out = dict(state)
     for at_key, min_key in (("session_reset_at", "session_reset_min"),
-                            ("weekly_reset_at", "weekly_reset_min")):
+                            ("weekly_reset_at", "weekly_reset_min"),
+                            ("overage_reset_at", "overage_reset_min")):
         at = state.get(at_key)
         if at is not None:
             out[min_key] = reset_minutes(str(at), now)
@@ -332,7 +338,7 @@ def _serve_payload(state: dict, now: float | None = None) -> dict:
     """
     if now is None:
         now = time.time()
-    return _expire_windows(_with_live_resets(state, now), now)
+    return _with_primary(_expire_windows(_with_live_resets(state, now), now))
 
 
 def utilization_pct(util: str) -> int:
@@ -343,29 +349,75 @@ def utilization_pct(util: str) -> int:
         return 0
 
 
+# Anthropic marks one window as the `representative-claim` — the constraint
+# currently worth surfacing. This maps each claim to the pct field that backs it.
+CLAIM_TO_PCT = {
+    "five_hour": "session_pct",
+    "seven_day": "weekly_pct",
+    "overage": "overage_pct",
+}
+
+
+def _primary_pct(state: dict) -> int:
+    """Utilization % of the representative (binding) window — what the bar shows.
+
+    Anthropic's `anthropic-ratelimit-unified-representative-claim` header names the
+    window — five_hour / seven_day / overage — that is currently the binding
+    constraint (it picks whichever has the furthest reset when you're actually
+    limited). We surface that window's % as the single headline number, matching
+    what Claude Code itself shows. If the claim is missing or unmapped (older API),
+    fall back to the higher of the two plan windows so we never under-report.
+    """
+    key = CLAIM_TO_PCT.get(state.get("representative_claim"))
+    if key and state.get(key) is not None:
+        return state[key]
+    return max(state.get("session_pct") or 0, state.get("weekly_pct") or 0)
+
+
+def _with_primary(state: dict) -> dict:
+    """Return a copy with primary_pct recomputed from the current window pcts.
+
+    Recomputed at serve time (after _expire_windows) so that when the
+    representative window rolls over to 0, the headline number follows.
+    """
+    out = dict(state)
+    out["primary_pct"] = _primary_pct(out)
+    return out
+
+
 def state_from_headers(headers: dict[str, str], now: float | None = None) -> dict:
     """Build the /usage payload from Anthropic rate-limit response headers."""
     if now is None:
         now = time.time()
-    status = _hdr(headers, "anthropic-ratelimit-unified-5h-status", "unknown")
+    # Prefer the top-level unified status (reflects the binding claim); fall back
+    # to the 5h window's status for the pre-unified-status header schema.
+    status = _hdr(headers, "anthropic-ratelimit-unified-status",
+                  _hdr(headers, "anthropic-ratelimit-unified-5h-status", "unknown"))
     session_reset_at = _epoch_or_none(_hdr(headers, "anthropic-ratelimit-unified-5h-reset"))
     weekly_reset_at = _epoch_or_none(_hdr(headers, "anthropic-ratelimit-unified-7d-reset"))
-    return {
+    overage_reset_at = _epoch_or_none(_hdr(headers, "anthropic-ratelimit-unified-overage-reset"))
+    state = {
         "ok": True,
         "status": status,
         "error": None,
         "last_updated": int(now),
         "session_pct": utilization_pct(_hdr(headers, "anthropic-ratelimit-unified-5h-utilization")),
         "weekly_pct": utilization_pct(_hdr(headers, "anthropic-ratelimit-unified-7d-utilization")),
+        "overage_pct": utilization_pct(_hdr(headers, "anthropic-ratelimit-unified-overage-utilization")),
         "session_reset_min": reset_minutes(_hdr(headers, "anthropic-ratelimit-unified-5h-reset"), now),
         "weekly_reset_min": reset_minutes(_hdr(headers, "anthropic-ratelimit-unified-7d-reset"), now),
+        "overage_reset_min": reset_minutes(_hdr(headers, "anthropic-ratelimit-unified-overage-reset"), now),
         "session_reset_at": session_reset_at,
         "weekly_reset_at": weekly_reset_at,
+        "overage_reset_at": overage_reset_at,
+        "representative_claim": _hdr(headers, "anthropic-ratelimit-unified-representative-claim", "unknown"),
         "source": "api",
         "stale": False,
         "idle": False,
         "token_state": "ok",
     }
+    state["primary_pct"] = _primary_pct(state)
+    return state
 
 
 def _expire_windows(state: dict, now: float | None = None) -> dict:
@@ -384,6 +436,7 @@ def _expire_windows(state: dict, now: float | None = None) -> dict:
     for at_key, min_key, pct_key in (
         ("session_reset_at", "session_reset_min", "session_pct"),
         ("weekly_reset_at", "weekly_reset_min", "weekly_pct"),
+        ("overage_reset_at", "overage_reset_min", "overage_pct"),
     ):
         at = state.get(at_key)
         if at is not None and now >= at:
@@ -431,10 +484,15 @@ def _error_state(msg: str) -> dict:
         "last_updated": int(time.time()),
         "session_pct": 0,
         "weekly_pct": 0,
+        "overage_pct": 0,
         "session_reset_min": None,
         "weekly_reset_min": None,
+        "overage_reset_min": None,
         "session_reset_at": None,
         "weekly_reset_at": None,
+        "overage_reset_at": None,
+        "representative_claim": "unknown",
+        "primary_pct": 0,
         "source": "api",
         "stale": False,
         "idle": False,

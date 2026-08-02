@@ -20,13 +20,14 @@ Single user, single machine. The daemon binds loopback only; the only outbound n
                           ▼
    daemon.py ── POST /v1/messages (1 Haiku token)
      │            parse response headers:
-     │              anthropic-ratelimit-unified-5h-utilization
-     │              anthropic-ratelimit-unified-5h-reset
-     │              anthropic-ratelimit-unified-7d-utilization
-     │              anthropic-ratelimit-unified-7d-reset
-     │              anthropic-ratelimit-unified-5h-status
+     │              anthropic-ratelimit-unified-5h-utilization / -reset
+     │              anthropic-ratelimit-unified-7d-utilization / -reset
+     │              anthropic-ratelimit-unified-overage-utilization / -reset
+     │              anthropic-ratelimit-unified-representative-claim
+     │              anthropic-ratelimit-unified-status  (top-level; falls back to 5h-status)
      │
-     ├─ GET /usage  → JSON {session_pct, weekly_pct, *_reset_min, status, ok, error}
+     ├─ GET /usage  → JSON {session_pct, weekly_pct, overage_pct, primary_pct,
+     │                      representative_claim, *_reset_min, status, ok, error}
      └─ GET /       → static/index.html (the PWA)          [127.0.0.1:7337]
                           ▲                    ▲
         poll /usage 60s   │                    │ load PWA in WKWebView
@@ -42,11 +43,13 @@ Every `CLAWDBAR_POLL` seconds (default 60):
 3. **Parse headers** into percentages and reset countdowns:
    - `session_pct` ← `anthropic-ratelimit-unified-5h-utilization` × 100
    - `weekly_pct` ← `anthropic-ratelimit-unified-7d-utilization` × 100
-   - `session_reset_min` ← minutes until `anthropic-ratelimit-unified-5h-reset`
-   - `weekly_reset_min` ← minutes until `anthropic-ratelimit-unified-7d-reset`
-   - `status` ← `anthropic-ratelimit-unified-5h-status`
+   - `overage_pct` ← `anthropic-ratelimit-unified-overage-utilization` × 100 (extra-usage bucket; 0 for a plain subscription)
+   - `session_reset_min` / `weekly_reset_min` / `overage_reset_min` ← minutes until the matching `*-reset`
+   - `representative_claim` ← `anthropic-ratelimit-unified-representative-claim` (`five_hour` / `seven_day` / `overage`)
+   - `status` ← `anthropic-ratelimit-unified-status` (top-level; falls back to `5h-status` on the older schema)
+   - `primary_pct` ← the % of the **representative** window (falls back to `max(session, weekly)` when the claim is unknown). This is the single headline number the menu bar shows, so the bar auto-tracks whichever window is currently binding.
 
-The bar percentages are **Anthropic's real subscription quota utilization**, not a self-set budget.
+The bar percentages are **Anthropic's real subscription quota utilization**, not a self-set budget. Anthropic designates one window as *representative* (the binding constraint), so the menu bar follows `primary_pct` rather than always showing the 5h session; the PWA still breaks out each window as its own bar (overage shown only when active).
 
 Token counts and cost estimates are **not available** from these headers; the PWA shows "official quota" under each bar instead.
 

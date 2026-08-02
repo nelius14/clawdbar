@@ -4,6 +4,24 @@ Append-only. One entry per work session.
 
 ---
 
+## 2026-08-02 — Anthropic's unified rate-limit headers grew: representative-claim + overage
+
+### What changed on Anthropic's side
+A live probe shows the unified rate-limit response now carries more than the 5h/7d pair we were built on. The old headers (`unified-5h-utilization`, `unified-7d-utilization`, the `*-reset`s, `5h-status`) **still exist and still parse** — nothing was silently broken. New alongside them:
+- `anthropic-ratelimit-unified-representative-claim` (`five_hour` / `seven_day` / `overage`) — which window is the *binding* constraint worth surfacing (picks the furthest-reset window when actually limited). This is what Claude Code itself displays.
+- `anthropic-ratelimit-unified-overage-utilization` / `-reset` / `-status` — a distinct **overage** (pre-paid extra-usage) bucket, separate from plan quota. `0.0` for a plain subscription.
+- `anthropic-ratelimit-unified-status` / `-reset` — top-level status/reset mirroring the representative window.
+- `anthropic-ratelimit-unified-fallback-percentage` — a suggested display value when a claim can't be resolved (not used yet).
+
+### Changes made
+- **daemon:** `state_from_headers` now parses the overage window + `representative_claim`, and derives `primary_pct` = the % of the representative window (falls back to `max(session, weekly)` when the claim is unknown/older API). `status` now prefers the top-level `unified-status`, falling back to `5h-status`. `_expire_windows` / `_with_live_resets` extended to the overage window; `primary_pct` is recomputed at serve time so it follows a window that rolls over to 0. All `/usage` fields are additive — old consumers keep working.
+- **menu bar:** the bar number now reads `primary_pct` (falls back to `session_pct` for an older daemon), so it auto-tracks whichever window binds — Session / Weekly / Overage. The right-click header names the active window.
+- **PWA:** added a third "Overage" card, hidden unless `overage_pct > 0` (per decision: surface only when active). The menu-bar nav delegate re-measures popover height ~0.6s after load so the late-appearing overage card isn't clipped.
+- **tests:** +7 (overage/claim parsing, `primary_pct` selection + fallback, status fallback, overage window expiry, serve-time primary recompute). 66 passing.
+
+### Verified
+Drove `poll_api` + `_serve_payload` against a live probe: `primary_pct 48` correctly followed `representative_claim: five_hour`, `overage_pct 0`, `status allowed` from the top-level header.
+
 ## 2026-06-20 (pm) — THE real fix: activity-gating (stop probing while idle)
 
 ### Confirmed root cause of the recurring dark windows

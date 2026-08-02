@@ -273,6 +273,20 @@
     </div>
   </div>
 
+  <!-- Overage (extra-usage) card — only shown when overage utilization > 0. -->
+  <div class="card" id="overage-card" style="display:none">
+    <div class="card-row">
+      <div class="card-pct"><span id="overage-pct">—</span>%</div>
+      <div style="display:flex; flex-direction:column; align-items:flex-end; justify-content:flex-end;">
+        <div class="card-label">Overage</div>
+        <div class="card-reset" id="overage-reset">Resets in —</div>
+      </div>
+    </div>
+    <div class="bar-track">
+      <div class="bar-fill" id="overage-bar" style="width:0%"></div>
+    </div>
+  </div>
+
 
 </div>
 
@@ -1000,6 +1014,20 @@ function updateUI(data) {
     ? `Resets in ${fmtMinutes(data.weekly_reset_min)}`
     : 'Resets in —';
   document.getElementById('weekly-reset').textContent = wReset;
+
+  // Overage (extra-usage) card: surfaced only when there is active overage.
+  // Most subscription users have none (overage_pct 0), so it stays hidden.
+  const ov = data.overage_pct ?? 0;
+  const overageCard = document.getElementById('overage-card');
+  if (ov > 0) {
+    document.getElementById('overage-pct').textContent = ov;
+    setBar(document.getElementById('overage-bar'), ov);
+    document.getElementById('overage-reset').textContent =
+      data.overage_reset_min != null ? `Resets in ${fmtMinutes(data.overage_reset_min)}` : 'Resets in —';
+    overageCard.style.display = '';
+  } else {
+    overageCard.style.display = 'none';
+  }
 
   // Stale: serving last good reading while waiting for a token refresh.
   // Idle: deliberately paused (no recent Claude Code use) — normal, not an error.

@@ -169,6 +169,67 @@ def test_state_from_headers_missing_defaults():
     assert st["session_pct"] == 0
     assert st["weekly_pct"] == 0
     assert st["status"] == "unknown"
+    assert st["overage_pct"] == 0
+    assert st["representative_claim"] == "unknown"
+
+
+# ---- representative-claim / overage (new unified header schema) ----------
+
+def test_state_from_headers_parses_overage_and_claim():
+    now = 1_700_000_000.0
+    headers = {
+        "anthropic-ratelimit-unified-5h-utilization": "0.34",
+        "anthropic-ratelimit-unified-7d-utilization": "0.07",
+        "anthropic-ratelimit-unified-overage-utilization": "0.20",
+        "anthropic-ratelimit-unified-overage-reset": str(now + 1800),
+        "anthropic-ratelimit-unified-representative-claim": "five_hour",
+        "anthropic-ratelimit-unified-status": "allowed",
+    }
+    st = daemon.state_from_headers(headers, now=now)
+    assert st["session_pct"] == 34
+    assert st["weekly_pct"] == 7
+    assert st["overage_pct"] == 20
+    assert st["overage_reset_min"] == 30
+    assert st["representative_claim"] == "five_hour"
+    assert st["status"] == "allowed"          # top-level unified status
+    assert st["primary_pct"] == 34            # five_hour is representative → session %
+
+
+def test_primary_pct_follows_representative_claim():
+    base = {"session_pct": 34, "weekly_pct": 80, "overage_pct": 12}
+    assert daemon._primary_pct({**base, "representative_claim": "five_hour"}) == 34
+    assert daemon._primary_pct({**base, "representative_claim": "seven_day"}) == 80
+    assert daemon._primary_pct({**base, "representative_claim": "overage"}) == 12
+
+
+def test_primary_pct_unknown_claim_falls_back_to_max_plan_window():
+    st = {"session_pct": 34, "weekly_pct": 80, "overage_pct": 5, "representative_claim": "unknown"}
+    assert daemon._primary_pct(st) == 80      # higher of session/weekly, ignores overage
+
+
+def test_status_falls_back_to_5h_when_no_top_level():
+    # Older schema: no unified-status header → use the 5h window's status.
+    st = daemon.state_from_headers(
+        {"anthropic-ratelimit-unified-5h-status": "allowed_warning"}, now=1000)
+    assert st["status"] == "allowed_warning"
+
+
+def test_expire_windows_zeroes_elapsed_overage():
+    st = _good(overage_pct=25, overage_reset_at=2000, overage_reset_min=5)
+    out = daemon._expire_windows(st, now=3000)
+    assert out["overage_pct"] == 0
+    assert out["overage_reset_min"] is None
+    assert out["overage_reset_at"] is None
+
+
+def test_serve_payload_recomputes_primary_after_overage_window_resets():
+    # Overage is the binding claim, but its window elapsed since the last poll:
+    # the headline must drop to 0, not keep serving the stale overage %.
+    st = _good(representative_claim="overage", overage_pct=90,
+               overage_reset_at=2000, overage_reset_min=5)
+    out = daemon._serve_payload(st, now=3000)
+    assert out["overage_pct"] == 0
+    assert out["primary_pct"] == 0
 
 
 # ---- refresh_state / relaunch decision ----------------------------------
