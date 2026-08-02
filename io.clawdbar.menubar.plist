@@ -18,8 +18,14 @@
     <key>RunAtLoad</key>
     <true/>
 
+    <!-- Restart only on a crash. "Quit Clawdbar" calls NSApp.terminate_(),
+         which exits 0; an unconditional KeepAlive would relaunch the app and
+         make Quit look like a reload. RunAtLoad still brings it back at login. -->
     <key>KeepAlive</key>
-    <true/>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
 
     <key>StandardOutPath</key>
     <string>/Users/REPLACE_USER/Library/Logs/clawdbar-menubar.out.log</string>
