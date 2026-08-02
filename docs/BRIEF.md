@@ -38,7 +38,11 @@ There is no `overage` window and no `representative-claim` field here, both of w
 
 ### Reset countdown
 
-Shown only when a window is at or above `RESET_HINT_AT` (default 80%). The design rule: surface the countdown when it is the number you would act on, and stay quiet otherwise. A `resets_at` in the past is treated as absent rather than rendered as a negative duration.
+Shown for the 5h session window only, always, prefixed with `↻`. Per-window rather than threshold-gated: the session window resets several times a day, so "how long until this clears" is a number you act on, while the weekly reset is days away and never changes what you do next.
+
+An earlier version gated the countdown on usage ≥80% for *both* windows. That was worse in both directions — it hid the session countdown exactly when you were pacing yourself early, and surfaced a weekly countdown that was never actionable.
+
+A `resets_at` in the past is treated as absent rather than rendered as a negative duration.
 
 ## Why it looks like this (the v0.2.0 rewrite)
 

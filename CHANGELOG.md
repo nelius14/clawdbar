@@ -2,6 +2,15 @@
 
 All notable changes to Clawdbar. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.1] — 2026-08-03
+
+### Changed
+- The reset countdown is now per-window instead of threshold-gated, and renders as `↻2h14m`: always shown for the 5h session window, never for 7d. Previously both windows showed a countdown once usage passed 80%, which hid the session countdown while pacing early and surfaced a weekly countdown that was never actionable. `RESET_HINT_AT` is replaced by a `show_reset` flag per entry in `WINDOWS`, plus `RESET_GLYPH`.
+
+```
+Opus 5 · 5h 62% ↻2h14m · 7d 20%
+```
+
 ## [0.2.0] — 2026-08-02
 
 Stripped to a Claude Code status line. **Breaking:** the menu bar app, the daemon, and both LaunchAgents are gone.

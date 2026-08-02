@@ -15,8 +15,8 @@ were already making. No OAuth token, no API probe, no daemon.
 
 Renders, e.g.:
 
-    Opus 5 · 5h 62% · 7d 20%
-    Opus 5 · 5h 91% (resets in 2h14m) · 7d 34%     <- countdown appears when it matters
+    Opus 5 · 5h 62% ↻2h14m · 7d 20%      <- ↻ is time until the 5h window resets
+    Opus 5 · 5h 96% ↻11m · 7d 34%
 
 Install: see README.md. Requires nothing but Python 3 and stdlib.
 
@@ -27,14 +27,21 @@ import json
 import sys
 import time
 
-# Show the reset countdown only once a window is close enough to matter.
-# Below this it is noise; above it, it is the number you actually act on.
-RESET_HINT_AT = 80
-
 SEPARATOR = " · "
 
-# Claude Code exposes these two windows. Order is display order.
-WINDOWS = (("five_hour", "5h"), ("seven_day", "7d"))
+# Marks a countdown, so `2h14m` can't be misread as time already used.
+RESET_GLYPH = "↻"
+
+# Claude Code exposes these two windows. Order is display order; the flag is
+# whether to show the reset countdown.
+#
+# Only the session window gets one. It resets several times a day, so "how
+# long until this clears" is a number you act on. The weekly reset is days
+# away and never changes what you do next — showing it is just noise.
+WINDOWS = (
+    ("five_hour", "5h", True),
+    ("seven_day", "7d", False),
+)
 
 
 def _pct(value) -> int | None:
@@ -58,8 +65,8 @@ def format_duration(seconds: float) -> str:
     return f"{minutes}m"
 
 
-def format_window(label: str, window, now: float) -> str | None:
-    """One window as `5h 62%`, plus a reset countdown when it's running hot."""
+def format_window(label: str, window, now: float, show_reset: bool = False) -> str | None:
+    """One window as `5h 62%`, optionally with its reset countdown appended."""
     if not isinstance(window, dict):
         return None
     pct = _pct(window.get("used_percentage"))
@@ -67,13 +74,14 @@ def format_window(label: str, window, now: float) -> str | None:
         return None
 
     text = f"{label} {pct}%"
-    if pct >= RESET_HINT_AT:
+    if show_reset:
         try:
             remaining = float(window["resets_at"]) - now
         except (TypeError, ValueError, KeyError):
             remaining = 0
+        # A reset already in the past is stale data, not a negative countdown.
         if remaining > 0:
-            text += f" (resets in {format_duration(remaining)})"
+            text += f" {RESET_GLYPH}{format_duration(remaining)}"
     return text
 
 
@@ -88,8 +96,8 @@ def render(payload: dict, now: float | None = None) -> str:
 
     rate_limits = payload.get("rate_limits")
     if isinstance(rate_limits, dict):
-        for key, label in WINDOWS:
-            text = format_window(label, rate_limits.get(key), now)
+        for key, label, show_reset in WINDOWS:
+            text = format_window(label, rate_limits.get(key), now, show_reset)
             if text:
                 parts.append(text)
 

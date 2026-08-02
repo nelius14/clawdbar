@@ -3,14 +3,12 @@
 Claude usage in your Claude Code status line, from Anthropic's official numbers.
 
 ```
-Opus 5 · 5h 62% · 7d 20%
+Opus 5 · 5h 62% ↻2h14m · 7d 20%
 ```
 
-When a window gets close to its limit, the countdown you actually act on appears:
-
-```
-Opus 5 · 5h 91% (resets in 2h14m) · 7d 34%
-```
+`↻` is how long until the 5-hour session window resets. Only the session window
+gets a countdown — it resets several times a day, so it's a number you act on.
+The weekly reset is days away and never changes what you do next.
 
 ## What it does
 
@@ -46,9 +44,9 @@ Everything worth changing is a constant at the top of `clawdbar_statusline.py`:
 
 | Constant | Default | Meaning |
 |---|---|---|
-| `RESET_HINT_AT` | `80` | Usage % above which the reset countdown appears |
+| `RESET_GLYPH` | `"↻"` | Marker before the reset countdown |
 | `SEPARATOR` | `" · "` | Text between segments |
-| `WINDOWS` | 5h, 7d | Which windows to show, and their labels |
+| `WINDOWS` | 5h (with countdown), 7d (without) | Which windows to show, their labels, and whether each gets a reset countdown |
 
 To add context-window usage, which Claude Code passes in the same blob:
 

@@ -65,18 +65,29 @@ def test_unusable_window_is_dropped_not_faked(bad):
 
 # ---- reset countdown -----------------------------------------------------
 
-def test_no_countdown_when_usage_is_low():
+def test_session_countdown_always_shows_even_at_low_usage():
+    """The 5h window resets several times a day, so the countdown is always
+    worth knowing — not only when you are nearly out."""
     line = cs.render(
-        _payload(five={"used_percentage": 40, "resets_at": NOW + 3600}), NOW
+        _payload(five={"used_percentage": 40, "resets_at": NOW + 8040}), NOW
     )
-    assert "resets in" not in line
+    assert line == "Opus 5 · 5h 40% ↻2h14m"
 
 
-def test_countdown_appears_when_running_hot():
+def test_weekly_countdown_is_never_shown():
+    """A reset next week is not actionable; it would just crowd the line."""
     line = cs.render(
-        _payload(five={"used_percentage": 91, "resets_at": NOW + 8040}), NOW
+        _payload(seven={"used_percentage": 91, "resets_at": NOW + 8040}), NOW
     )
-    assert line == "Opus 5 · 5h 91% (resets in 2h14m)"
+    assert line == "Opus 5 · 7d 91%"
+
+
+def test_both_windows_with_only_the_session_countdown():
+    line = cs.render(
+        _payload(five={"used_percentage": 62, "resets_at": NOW + 8040},
+                 seven={"used_percentage": 20, "resets_at": NOW + 400_000}), NOW
+    )
+    assert line == "Opus 5 · 5h 62% ↻2h14m · 7d 20%"
 
 
 def test_countdown_suppressed_once_the_window_has_passed():
@@ -87,7 +98,7 @@ def test_countdown_suppressed_once_the_window_has_passed():
     assert line == "Opus 5 · 5h 95%"
 
 
-def test_hot_window_without_a_reset_time_still_renders():
+def test_session_window_without_a_reset_time_still_renders():
     line = cs.render(_payload(five={"used_percentage": 99}), NOW)
     assert line == "Opus 5 · 5h 99%"
 
