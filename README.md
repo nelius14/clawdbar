@@ -29,7 +29,8 @@ Clone anywhere, then point Claude Code at the script in `~/.claude/settings.json
 {
   "statusLine": {
     "type": "command",
-    "command": "/absolute/path/to/clawdbar/clawdbar_statusline.py"
+    "command": "/absolute/path/to/clawdbar/clawdbar_statusline.py",
+    "refreshInterval": 60
   }
 }
 ```

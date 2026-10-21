@@ -4,6 +4,17 @@ Append-only. One entry per work session.
 
 ---
 
+## 2026-10-21 — Reassessment against Claude Code 2.1.306; add refreshInterval
+
+Re-checked the status line docs. The `rate_limits.five_hour/seven_day` seam is unchanged and now officially documented, with a near-identical Python example — Clawdbar's remaining value-add is the `↻` 5h reset countdown and never-fail input handling. No code change needed.
+
+New since v0.2.0:
+- `rate_limits.spend_limit` (Claude apps gateway only) — irrelevant to Pro/Max; not rendered.
+- Claude Code drops a window once `resets_at` passes and re-renders at that moment, so our past-reset guard is now mostly redundant. Kept.
+- `statusLine.refreshInterval` re-runs the command on a timer. Status line updates are otherwise event-driven, so the countdown froze while idle. Set `refreshInterval: 60` in `~/.claude/settings.json` and in the README install snippet. Script untouched, so no deploy.
+
+---
+
 ## 2026-08-02 — Quit fix, then stripped to a status line (v0.2.0)
 
 ### The reported bug: "Quit always reloads"

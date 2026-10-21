@@ -42,7 +42,7 @@ Shown for the 5h session window only, always, prefixed with `↻`. Per-window ra
 
 An earlier version gated the countdown on usage ≥80% for *both* windows. That was worse in both directions — it hid the session countdown exactly when you were pacing yourself early, and surfaced a weekly countdown that was never actionable.
 
-A `resets_at` in the past is treated as absent rather than rendered as a negative duration.
+A `resets_at` in the past is treated as absent rather than rendered as a negative duration. Claude Code now drops an expired window itself (and re-renders at `resets_at`), so this guard rarely fires — kept as defense in depth.
 
 ## Why it looks like this (the v0.2.0 rewrite)
 
@@ -69,4 +69,4 @@ For usage attribution (what is *driving* consumption: cache misses, >150k contex
 ## Risks
 
 - **The seam is documented but not versioned.** If Claude Code renames or drops `rate_limits`, the segment silently disappears and only the model name renders. That is the intended failure mode — quiet degradation, never a broken status line — but it also means breakage is easy to miss. The tests pin the field names.
-- **No staleness signal.** The line only updates when Claude Code renders it. Inherent to the seam and acceptable: if no session is open, there is no usage to watch.
+- **Staleness when idle.** The line only updates when Claude Code renders it, which is event-driven (new message, `/compact`, mode change, a `resets_at` arriving). With no timer, the `↻` countdown freezes while the session sits idle. Fix is configuration, not code: set `"refreshInterval": 60` on `statusLine` in `settings.json` so Claude Code re-runs the script every minute. No background process on our side — Claude Code owns the timer.
