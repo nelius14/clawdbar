@@ -7,13 +7,6 @@ __pycache__/
 *.py[cod]
 .venv/
 
-# pytest (cache artifacts; on the SMB mount these can't be rm'd in-session)
+# pytest
 .pytest_cache/
 pytest-cache-files-*/
-
-# SMB client delete-pending artifacts
-.smbdelete*
-**/.smbdelete*
-
-# archived artifacts
-assets/archive/
