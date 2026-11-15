@@ -2,6 +2,19 @@
 
 All notable changes to Clawdbar. Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [0.2.2] — 2026-11-15
+
+### Added
+- Severity colour: each percentage turns amber at 80% and red at 95%, per window. Only the number is painted, not the label or the `↻` countdown. Controlled by `COLOR`, `WARN_AT`, `CRIT_AT` at the top of the script. `render()` stays plain by default; only `main()` opts in.
+- README section on starting the 5h window early with a Claude Code scheduled task, kept outside this repo on purpose.
+
+### Changed
+- Examples and fixtures use `Opus 5.5`.
+- Bug report template asks for Claude Code/Python versions and the captured input instead of a daemon log; CONTRIBUTING clone URL corrected.
+
+### Removed
+- Menu bar era leftovers: `assets/dashboard.gif`, `assets/approaching_limit.png`, the empty `docs/assets/`, and the daemon-era `honest-staleness` spec and plan.
+
 ## [0.2.1] — 2026-08-03
 
 ### Changed

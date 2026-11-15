@@ -20,7 +20,7 @@ NOW = 1_800_000_000.0
 SCRIPT = ROOT / "clawdbar_statusline.py"
 
 
-def _payload(five=None, seven=None, model="Opus 5"):
+def _payload(five=None, seven=None, model="Opus 5.5"):
     rate_limits = {}
     if five is not None:
         rate_limits["five_hour"] = five
@@ -37,19 +37,19 @@ def _payload(five=None, seven=None, model="Opus 5"):
 def test_used_percentage_is_already_0_to_100():
     """The raw API headers are 0.0-1.0; this field is not. No scaling."""
     line = cs.render(_payload(five={"used_percentage": 62.4}), NOW)
-    assert line == "Opus 5 · 5h 62%"
+    assert line == "Opus 5.5 · 5h 62%"
 
 
 def test_both_windows_render_in_order():
     line = cs.render(
         _payload(five={"used_percentage": 62}, seven={"used_percentage": 20}), NOW
     )
-    assert line == "Opus 5 · 5h 62% · 7d 20%"
+    assert line == "Opus 5.5 · 5h 62% · 7d 20%"
 
 
 def test_weekly_window_may_be_absent():
     """Claude Code marks seven_day optional."""
-    assert cs.render(_payload(five={"used_percentage": 5}), NOW) == "Opus 5 · 5h 5%"
+    assert cs.render(_payload(five={"used_percentage": 5}), NOW) == "Opus 5.5 · 5h 5%"
 
 
 def test_zero_percent_still_renders():
@@ -60,7 +60,7 @@ def test_zero_percent_still_renders():
 @pytest.mark.parametrize("bad", [None, "abc", {}, {"used_percentage": None}])
 def test_unusable_window_is_dropped_not_faked(bad):
     line = cs.render(_payload(five=bad, seven={"used_percentage": 30}), NOW)
-    assert line == "Opus 5 · 7d 30%"
+    assert line == "Opus 5.5 · 7d 30%"
 
 
 # ---- reset countdown -----------------------------------------------------
@@ -71,7 +71,7 @@ def test_session_countdown_always_shows_even_at_low_usage():
     line = cs.render(
         _payload(five={"used_percentage": 40, "resets_at": NOW + 8040}), NOW
     )
-    assert line == "Opus 5 · 5h 40% ↻2h14m"
+    assert line == "Opus 5.5 · 5h 40% ↻2h14m"
 
 
 def test_weekly_countdown_is_never_shown():
@@ -79,7 +79,7 @@ def test_weekly_countdown_is_never_shown():
     line = cs.render(
         _payload(seven={"used_percentage": 91, "resets_at": NOW + 8040}), NOW
     )
-    assert line == "Opus 5 · 7d 91%"
+    assert line == "Opus 5.5 · 7d 91%"
 
 
 def test_both_windows_with_only_the_session_countdown():
@@ -87,7 +87,7 @@ def test_both_windows_with_only_the_session_countdown():
         _payload(five={"used_percentage": 62, "resets_at": NOW + 8040},
                  seven={"used_percentage": 20, "resets_at": NOW + 400_000}), NOW
     )
-    assert line == "Opus 5 · 5h 62% ↻2h14m · 7d 20%"
+    assert line == "Opus 5.5 · 5h 62% ↻2h14m · 7d 20%"
 
 
 def test_countdown_suppressed_once_the_window_has_passed():
@@ -95,12 +95,12 @@ def test_countdown_suppressed_once_the_window_has_passed():
     line = cs.render(
         _payload(five={"used_percentage": 95, "resets_at": NOW - 60}), NOW
     )
-    assert line == "Opus 5 · 5h 95%"
+    assert line == "Opus 5.5 · 5h 95%"
 
 
 def test_session_window_without_a_reset_time_still_renders():
     line = cs.render(_payload(five={"used_percentage": 99}), NOW)
-    assert line == "Opus 5 · 5h 99%"
+    assert line == "Opus 5.5 · 5h 99%"
 
 
 @pytest.mark.parametrize("seconds,expected", [
@@ -119,11 +119,50 @@ def test_duration_formatting(seconds, expected):
 
 def test_no_rate_limits_shows_just_the_model():
     """rate_limits is absent until the session's first API response."""
-    assert cs.render({"model": {"display_name": "Opus 5"}}, NOW) == "Opus 5"
+    assert cs.render({"model": {"display_name": "Opus 5.5"}}, NOW) == "Opus 5.5"
 
 
 def test_empty_payload_renders_nothing():
     assert cs.render({}, NOW) == ""
+
+
+# ---- severity colour -------------------------------------------------------
+
+AMBER, RED, RESET = "\033[33m", "\033[31m", "\033[0m"
+
+
+@pytest.mark.parametrize("pct,code", [
+    (0, ""), (79, ""), (80, AMBER), (94, AMBER), (95, RED), (100, RED),
+])
+def test_percentage_colour_thresholds(pct, code):
+    line = cs.render(_payload(five={"used_percentage": pct}), NOW, color=True)
+    expected = f"{code}{pct}%{RESET}" if code else f"{pct}%"
+    assert line == f"Opus 5.5 · 5h {expected}"
+
+
+def test_only_the_percentage_is_coloured_not_the_countdown():
+    five = {"used_percentage": 85, "resets_at": NOW + 2 * 3600}
+    line = cs.render(_payload(five=five), NOW, color=True)
+    assert line == f"Opus 5.5 · 5h {AMBER}85%{RESET} ↻2h00m"
+
+
+def test_each_window_is_coloured_on_its_own():
+    line = cs.render(
+        _payload(five={"used_percentage": 96}, seven={"used_percentage": 20}),
+        NOW, color=True)
+    assert line == f"Opus 5.5 · 5h {RED}96%{RESET} · 7d 20%"
+
+
+def test_colour_is_off_by_default_in_render():
+    """render() stays pure and plain; only main() opts in."""
+    line = cs.render(_payload(five={"used_percentage": 99}), NOW)
+    assert "\033" not in line
+
+
+def test_hook_colours_high_usage_from_stdin():
+    r = _run(json.dumps(_payload(five={"used_percentage": 97})))
+    assert r.returncode == 0
+    assert f"{RED}97%{RESET}" in r.stdout
 
 
 # ---- the actual hook, as Claude Code invokes it --------------------------
@@ -139,7 +178,7 @@ def test_hook_renders_from_stdin():
     r = _run(json.dumps(_payload(
         five={"used_percentage": 62}, seven={"used_percentage": 20})))
     assert r.returncode == 0
-    assert r.stdout.strip() == "Opus 5 · 5h 62% · 7d 20%"
+    assert r.stdout.strip() == "Opus 5.5 · 5h 62% · 7d 20%"
 
 
 @pytest.mark.parametrize("junk", ["", "not json", "[]", "null", "   "])

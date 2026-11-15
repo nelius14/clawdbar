@@ -15,8 +15,11 @@ were already making. No OAuth token, no API probe, no daemon.
 
 Renders, e.g.:
 
-    Opus 5 · 5h 62% ↻2h14m · 7d 20%      <- ↻ is time until the 5h window resets
-    Opus 5 · 5h 96% ↻11m · 7d 34%
+    Opus 5.5 · 5h 62% ↻2h14m · 7d 20%      <- ↻ is time until the 5h window resets
+    Opus 5.5 · 5h 96% ↻11m · 7d 34%
+
+Each percentage turns amber at WARN_AT and red at CRIT_AT (ANSI colour, on
+by default; set COLOR = False for plain text).
 
 Install: see README.md. Requires nothing but Python 3 and stdlib.
 
@@ -31,6 +34,12 @@ SEPARATOR = " · "
 
 # Marks a countdown, so `2h14m` can't be misread as time already used.
 RESET_GLYPH = "↻"
+
+# Severity colour on the percentage. Each window is judged on its own.
+COLOR = True
+WARN_AT = 80   # amber from here
+CRIT_AT = 95   # red from here
+_AMBER, _RED, _RESET = "\033[33m", "\033[31m", "\033[0m"
 
 # Claude Code exposes these two windows. Order is display order; the flag is
 # whether to show the reset countdown.
@@ -65,15 +74,29 @@ def format_duration(seconds: float) -> str:
     return f"{minutes}m"
 
 
-def format_window(label: str, window, now: float, show_reset: bool = False) -> str | None:
-    """One window as `5h 62%`, optionally with its reset countdown appended."""
+def _paint(pct: int, text: str) -> str:
+    """Wrap text in amber/red once pct crosses WARN_AT / CRIT_AT."""
+    if pct >= CRIT_AT:
+        return f"{_RED}{text}{_RESET}"
+    if pct >= WARN_AT:
+        return f"{_AMBER}{text}{_RESET}"
+    return text
+
+
+def format_window(label: str, window, now: float, show_reset: bool = False,
+                  color: bool = False) -> str | None:
+    """One window as `5h 62%`, optionally with its reset countdown appended.
+
+    With color, only the percentage is painted; the label and countdown stay plain.
+    """
     if not isinstance(window, dict):
         return None
     pct = _pct(window.get("used_percentage"))
     if pct is None:
         return None
 
-    text = f"{label} {pct}%"
+    pct_text = f"{pct}%"
+    text = f"{label} {_paint(pct, pct_text) if color else pct_text}"
     if show_reset:
         try:
             remaining = float(window["resets_at"]) - now
@@ -85,8 +108,11 @@ def format_window(label: str, window, now: float, show_reset: bool = False) -> s
     return text
 
 
-def render(payload: dict, now: float | None = None) -> str:
-    """Build the status line. Missing pieces are dropped, never faked."""
+def render(payload: dict, now: float | None = None, color: bool = False) -> str:
+    """Build the status line. Missing pieces are dropped, never faked.
+
+    Plain by default so render() stays pure; main() opts in via COLOR.
+    """
     now = time.time() if now is None else now
     parts = []
 
@@ -97,7 +123,7 @@ def render(payload: dict, now: float | None = None) -> str:
     rate_limits = payload.get("rate_limits")
     if isinstance(rate_limits, dict):
         for key, label, show_reset in WINDOWS:
-            text = format_window(label, rate_limits.get(key), now, show_reset)
+            text = format_window(label, rate_limits.get(key), now, show_reset, color)
             if text:
                 parts.append(text)
 
@@ -112,7 +138,7 @@ def main() -> int:
     if not isinstance(payload, dict):
         return 0
     try:
-        line = render(payload)
+        line = render(payload, color=COLOR)
     except Exception:
         return 0
     if line:

@@ -7,7 +7,7 @@ Thanks for your interest. Clawdbar is one stdlib file that formats a JSON blob â
 Requires **Python 3**, **uv** (`brew install uv`) for the test runner, and Claude Code with a Claude.ai subscription to see it live.
 
 ```bash
-git clone https://github.com/nealyee/clawdbar.git
+git clone https://github.com/nelius14/clawdbar.git
 cd clawdbar
 chmod +x clawdbar_statusline.py
 ```
@@ -15,7 +15,7 @@ chmod +x clawdbar_statusline.py
 There is no build and nothing to install. To see it render without wiring it into Claude Code:
 
 ```bash
-echo '{"model":{"display_name":"Opus 5"},"rate_limits":{"five_hour":{"used_percentage":62}}}' \
+echo '{"model":{"display_name":"Opus 5.5"},"rate_limits":{"five_hour":{"used_percentage":62}}}' \
   | ./clawdbar_statusline.py
 ```
 

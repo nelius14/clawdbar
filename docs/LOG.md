@@ -4,6 +4,20 @@ Append-only. One entry per work session.
 
 ---
 
+## 2026-11-15 (later) — Full review; severity colour added
+
+Reviewed project state, ~25 similar tools and the current Claude Code docs. Project healthy: seam unchanged, tests green, live copy in sync.
+- Per-model weekly limits (the third `/usage` bar) are still **not** in the status line payload; many open requests on anthropics/claude-code. Showing them needs the OAuth usage API, which is the v0.1 pattern, so it stays out.
+- Other tools mostly hit the OAuth `/usage` API; the ones that stay on stdin (claude-pace, CCometixLine) add a "pace" indicator (usage vs elapsed window). Offered, not wanted.
+- New unused passive fields: `prompt_cache.*`, `effort.level`, `fast_mode`. Not added.
+- Shipped v0.2.2: amber ≥80%, red ≥95%, percentage only. 10 new tests (37 total). Deployed to `~/.claude/statusline/`.
+- Skipped by choice: pace indicator.
+- Cleanup: removed the tracked daemon-era `honest-staleness` spec and plan from `docs/superpowers/`; updated "Opus 5" to "Opus 5.5" in README, CONTRIBUTING, BRIEF, CLAUDE.md, the script docstring and tests. CHANGELOG entries left as written (they record what each version printed).
+- Further cleanup: removed the unreferenced menu bar images (`assets/dashboard.gif`, `assets/approaching_limit.png`) and the empty `docs/assets/.gitkeep`; rewrote the bug report template (it asked for a daemon log and macOS version); fixed the CONTRIBUTING clone URL (`nealyee` → `nelius14`); trimmed stale `.gitignore` comments.
+- Not touched, needs a decision: `LICENSE` still describes bundled sprites/fonts that no longer exist (README already says to revisit before publishing). Local-only, ignored: `assets/archive/` (~73 MB of old recordings) and `.smbdelete*` files.
+
+---
+
 ## 2026-11-15 — Survey of similar tools; 5h warmup delegated to a scheduled task
 
 Compared Clawdbar with other `rate_limits` status lines (cc-usage-statusline, claude-limit-statusline, cship) and with warmup tools (CCLimitPing, CCAutoRenew, quota-beat). Clawdbar's seam is unchanged. Newer unused fields exist: `prompt_cache.*` (`warm`, `expires_at`, `hit_ratio`), `effort.level`, `fast_mode`. Not added.

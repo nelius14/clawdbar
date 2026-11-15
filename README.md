@@ -3,7 +3,7 @@
 Claude usage in your Claude Code status line, from Anthropic's official numbers.
 
 ```
-Opus 5 · 5h 62% ↻2h14m · 7d 20%
+Opus 5.5 · 5h 62% ↻2h14m · 7d 20%
 ```
 
 `↻` is how long until the 5-hour session window resets. Only the session window
@@ -47,6 +47,8 @@ Everything worth changing is a constant at the top of `clawdbar_statusline.py`:
 |---|---|---|
 | `RESET_GLYPH` | `"↻"` | Marker before the reset countdown |
 | `SEPARATOR` | `" · "` | Text between segments |
+| `COLOR` | `True` | Paint each percentage amber/red by severity; `False` for plain text |
+| `WARN_AT` / `CRIT_AT` | `80` / `95` | Percentages where amber and red start (judged per window) |
 | `WINDOWS` | 5h (with countdown), 7d (without) | Which windows to show, their labels, and whether each gets a reset countdown |
 
 To add context-window usage, which Claude Code passes in the same blob:
@@ -72,7 +74,7 @@ Caveats: it is a fixed timer, blind to `resets_at`, so it only lines up with res
 
 ```bash
 uv run --with pytest pytest -q                    # tests
-echo '{"model":{"display_name":"Opus 5"},"rate_limits":{"five_hour":{"used_percentage":62}}}' \
+echo '{"model":{"display_name":"Opus 5.5"},"rate_limits":{"five_hour":{"used_percentage":62}}}' \
   | ./clawdbar_statusline.py                      # render a sample line
 ```
 

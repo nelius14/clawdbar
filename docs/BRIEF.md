@@ -7,7 +7,7 @@ Architecture, decisions, and current state. CLAUDE.md points here; read this bef
 Clawdbar prints your official Claude.ai usage into the Claude Code status line:
 
 ```
-Opus 5 · 5h 62% · 7d 20%
+Opus 5.5 · 5h 62% · 7d 20%
 ```
 
 One stdlib Python file. No processes, no dependencies, no credentials, no network.
@@ -18,7 +18,7 @@ One stdlib Python file. No processes, no dependencies, no credentials, no networ
   Claude Code  ──(JSON on stdin, every status line render)──▶  clawdbar_statusline.py
                                                                         │
     {                                                                   ▼
-      "model": { "display_name": "Opus 5" },                    "Opus 5 · 5h 62% · 7d 20%"
+      "model": { "display_name": "Opus 5.5" },                  "Opus 5.5 · 5h 62% · 7d 20%"
       "rate_limits": {                                           (stdout, one line)
         "five_hour": { "used_percentage": 62, "resets_at": … },
         "seven_day": { "used_percentage": 20, "resets_at": … }

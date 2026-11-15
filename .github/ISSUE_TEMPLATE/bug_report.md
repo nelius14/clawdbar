@@ -4,14 +4,14 @@ about: Something isn't working as expected
 labels: bug
 ---
 
-**macOS version:**
+**Claude Code version** (`claude --version`):
 
-**uv version** (`uv --version`):
+**Python version** (`python3 --version`):
 
-**Steps to reproduce:**
+**Plan** (Pro / Max / Ultra — `rate_limits` only exists for subscribers):
 
-**Expected behaviour:**
+**What the status line shows:**
 
-**Actual behaviour:**
+**What you expected:**
 
-**Daemon log** (`tail -50 ~/Library/Logs/clawdbar.out.log`):
+**Input it received** (optional — add `tee /tmp/statusline.json |` before the script in your `statusLine.command` to capture the JSON; remove anything private):
