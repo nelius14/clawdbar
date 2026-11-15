@@ -64,6 +64,8 @@ The structural problem was not error handling. It was that the daemon had to *ma
 
 Anything requiring a daemon, a LaunchAgent, the OAuth token, or an API probe. If a feature appears to need one, that is v0.1 repeating — flag it rather than building it.
 
+Starting the 5h window early (a Haiku ping per reset) is a wanted feature but is delegated to a Claude Code scheduled task, configured outside this repo (see README). Don't pull it into the status line: that would need a timer, spawned processes, or a manufactured request.
+
 For usage attribution (what is *driving* consumption: cache misses, >150k context, subagent-heavy sessions, parallel sessions), Claude Code's built-in `/usage` already does this using data only the client holds. Don't reimplement it.
 
 ## Risks

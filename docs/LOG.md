@@ -4,6 +4,20 @@ Append-only. One entry per work session.
 
 ---
 
+## 2026-11-15 — Survey of similar tools; 5h warmup delegated to a scheduled task
+
+Compared Clawdbar with other `rate_limits` status lines (cc-usage-statusline, claude-limit-statusline, cship) and with warmup tools (CCLimitPing, CCAutoRenew, quota-beat). Clawdbar's seam is unchanged. Newer unused fields exist: `prompt_cache.*` (`warm`, `expires_at`, `hit_ratio`), `effort.level`, `fast_mode`. Not added.
+
+Warmup ("ping Haiku at each 5h reset to start the clock") conflicts with the brief: the status line is passive and can't write state or spawn processes, and the v0.1 daemon was exactly a manufactured request. Delegated instead to a Claude Code cloud scheduled task, outside this repo:
+- Name `5h warmup`, id `trig_016hxNb2fVqf26rBBNWALm1P`, model `claude-haiku-5-5`, no repos, no connectors.
+- Cron `CRON_TZ=Europe/London 7 2,7,12,17,22 * * *`. First run 2026-11-15 17:07 UTC.
+- Gotcha: `RemoteTrigger create` attaches all connectors by default; had to follow up with `clear_mcp_connections`. No effort-level field was set (the API body has none that I found).
+- Unverified: whether the window start floors to the clock hour, and whether cloud runs count toward the same 5h window. Check the status line `↻` after the first run.
+
+No code change, nothing to deploy.
+
+---
+
 ## 2026-10-21 — Reassessment against Claude Code 2.1.306; add refreshInterval
 
 Re-checked the status line docs. The `rate_limits.five_hour/seven_day` seam is unchanged and now officially documented, with a near-identical Python example — Clawdbar's remaining value-add is the `↻` 5h reset countdown and never-fail input handling. No code change needed.

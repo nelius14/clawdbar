@@ -57,6 +57,17 @@ if remaining is not None:
     parts.append(f"ctx {round(remaining)}%")
 ```
 
+## Starting the 5h window early (optional, not part of Clawdbar)
+
+The 5-hour window starts on your first message. If you want it already running when you sit down, a cheap Haiku ping on a timer does that. This deliberately lives **outside** this repo: Clawdbar is passive and must not schedule anything or make requests.
+
+Use a Claude Code scheduled task (`/schedule`, or claude.ai/code/routines) with a tiny prompt on Haiku, no repos and no connectors:
+
+- Prompt: `Reply with exactly: OK. Do not use any tools.`
+- Cron: `CRON_TZ=Europe/London 7 2,7,12,17,22 * * *` (`:07` because runs exactly on the hour can start late)
+
+Caveats: it is a fixed timer, blind to `resets_at`, so it only lines up with resets when nothing else started a window first (otherwise it is a harmless no-op). Scheduled tasks are a research preview and draw on your subscription usage like any session.
+
 ## Commands
 
 ```bash
